@@ -36,7 +36,7 @@ def build_mesh(config: ExperimentConfig) -> SurfaceMesh:
     target = config.section("target")
     mesh = SurfaceMesh.ellipsoid(
         target["semi_axes_m"],
-        target["mesh_latitude_segments"],
+        target["mesh_latitude_segments"],  # 这个是啥呀
         target["mesh_longitude_segments"],
     )
     scattering = target["scattering"]

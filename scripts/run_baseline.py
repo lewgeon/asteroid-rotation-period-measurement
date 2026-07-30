@@ -10,16 +10,16 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # 在后台进行图像渲染，不要打开任何窗口
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]  # 这个文件位于scripts中，因此parents[0]得到的是scripts的路径。parents[1]得到的才是项目路径
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+    sys.path.insert(0, str(SOURCE_ROOT))  # 这些都是非常工程化的操作了，这里暂时不用管。如果不加这条语句的话，就需要from src.asteroid_rotation.config import了
 
 from asteroid_rotation.config import load_experiment_config
 from asteroid_rotation.experiment import run_continuous_wave_experiment
@@ -104,7 +104,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = load_experiment_config(args.config)
+    config = load_experiment_config(args.config)  # 实际上就是读取.json文件，不过加入了很多验证的操作，因此看起来比较复杂。这部分暂时也不需要深究
     args.output.mkdir(parents=True, exist_ok=True)
     with (args.output / "config.snapshot.json").open("w", encoding="utf-8") as stream:
         json.dump(config.data, stream, ensure_ascii=False, indent=2)
@@ -120,7 +120,7 @@ def main() -> int:
         last_completed = completed
 
     start = time.perf_counter()
-    result = run_continuous_wave_experiment(config, progress_callback=update_progress)
+    result = run_continuous_wave_experiment(config, progress_callback=update_progress)  # 前面这段代码要执行很久吗？
     elapsed = time.perf_counter() - start
     progress.close()
 

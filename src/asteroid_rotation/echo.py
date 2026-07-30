@@ -112,7 +112,7 @@ def validate_sampling(
 
     rotation_bound = maximum_rotation_doppler_bound_hz(
         mesh, spin, geometry, wavelength_m
-    )
+    )  # 旋转引起的最大多普勒频移
     probe_times = np.linspace(0.0, duration_s, 2049)
     translation = evaluate_polynomial(translation_coefficients_hz, probe_times)
     modeled_bound = float(np.max(np.abs(translation)) + rotation_bound)
@@ -150,7 +150,7 @@ def simulate_continuous_wave_echo(
         raise ValueError("chunk_size must be positive")
 
     wavelength_m = SPEED_OF_LIGHT_M_S / carrier_frequency_hz
-    duration_s = float(schedule.elapsed_s[-1])
+    duration_s = float(schedule.elapsed_s[-1])  # 实现细节不重要，这些都好改，先看回波是如何生成的
     rotation_bound = validate_sampling(
         mesh,
         spin,
