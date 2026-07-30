@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asteroid-rotation"
+version = "0.1.0"
+description = "Physics-based asteroid radar echo simulation and rotation-period estimation"
+requires-python = ">=3.9"
+dependencies = [
+  "astropy",
+  "jsonschema",
+  "matplotlib",
+  "numpy",
+  "scipy",
+  "tqdm",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
