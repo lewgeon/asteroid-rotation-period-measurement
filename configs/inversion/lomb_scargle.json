@@ -1,0 +1,7 @@
+{
+  "stft_window_samples": 4096,
+  "stft_overlap_fraction": 0.75,
+  "period_min_s": 1800.0,
+  "period_max_s": 14400.0,
+  "period_grid_size": 20000
+}

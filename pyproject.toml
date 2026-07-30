@@ -3,19 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "asteroid-rotation"
+name = "asteroid-radar-research"
 version = "0.1.0"
 description = "Physics-based asteroid radar echo simulation and rotation-period estimation"
 requires-python = ">=3.9"
 dependencies = [
   "astropy",
   "astroquery",
-  "jsonschema",
   "matplotlib",
   "numpy",
   "scipy",
   "torch",
-  "tqdm",
 ]
 
 [tool.setuptools]

@@ -1,7 +1,7 @@
 # 小行星雷达回波自转周期测量实验计划
 
 > 状态：已批准，实施中  
-> 计划版本：v0.2  
+> 计划版本：v0.3  
 > 依据：Calvés 等（2025）的连续波雷达、微多普勒分析和层析处理思路  
 > 本阶段范围：仅定义实验方案、软件边界、实验矩阵和验收标准；审批前不进入实现
 >
@@ -12,6 +12,8 @@
 > 2026-07-30 实施记录：几何模块迁移为 PyTorch3D `Meshes` 与 `ico_sphere`，姿态旋转和面元复回波迁移到 Torch；新增 OBJ/PLY 入口、CPU `float64` 参考路径、CUDA `float32` 加速路径及后端一致性测试。11 项测试通过。采用 1280 面元的 CUDA 基线运行 5.42 s，较原 528 面元 NumPy 基线的 26.44 s 加速约 4.88 倍；RMS 带宽粗估计为 7148.71 s（相对误差 0.712%）。
 
 > 2026-07-30 光行时扩展：新增独立三事件解算器，使用 JPL Horizons 的太阳系质心几何状态和 Astropy 地面站状态，迭代求解发射、反射、接收时刻，并分别输出发射与接收视线。该工具尚未并入连续波回波主链路。完整变更记录见 [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md)。
+
+> 2026-07-30 v0.3：按科研流程重构为 `pointing`、`simulation`、`inversion` 和 `data` 四个模块。删除严格 JSON Schema 与重复输入防御逻辑；仿真和反演通过 `EchoDataset` 文件连接，可分别运行和验证。只保留会直接影响科研结论的检查。
 
 ## 1. 项目目标
 
@@ -218,65 +220,20 @@ A_i(t)\propto
 
 仿真开始前必须自动估计最大可能微多普勒并检查奈奎斯特条件。若配置可能混叠，程序应拒绝运行或自动提高采样率，不得静默产生错误数据。
 
-### 5.6 JSON 配置与校验
+### 5.6 简洁 JSON 配置
 
-所有物理、雷达、采样、噪声和反演参数从 JSON 读取，代码中不得维护另一套可修改的实验参数。项目提供 `config.schema.json`，启动时执行严格校验：
+可调实验参数继续保存在 JSON 中，但不再使用 JSON Schema、配置对象和逐字段
+防御性校验。配置按研究阶段分开：
 
-- 禁止未知字段；
-- 频率、距离、时间等字段名显式包含单位；
-- 频率与波长只能指定一个；
-- 连续波配置不得混入脉冲专用参数；
-- 脉冲模式必须提供实际发射时刻或时刻文件；
-- 自动检查采样、带宽、占空比和观测跨度。
+- `configs/pointing/`：星历、测站和观测时间；
+- `configs/simulation/`：目标、雷达、采样和噪声；
+- `configs/inversion/`：STFT和周期搜索参数。
 
-示例结构：
+参数名显式写出单位。研究脚本直接通过 `json.loads` 读取字典，让配置值到
+公式变量的对应关系保持可见。仅在错误会静默破坏科研结论时检查，例如采样
+率导致多普勒混叠、照射几何产生零回波或光行时迭代不收敛。
 
-```json
-{
-  "$schema": "../schemas/experiment.schema.json",
-  "experiment": {
-    "name": "cw_ellipsoid_baseline",
-    "seed": 20250729
-  },
-  "compute": {
-    "backend": "pytorch3d",
-    "device": "auto",
-    "dtype": "float32"
-  },
-  "target": {
-    "model_type": "ellipsoid_mesh",
-    "semi_axes_m": [70.0, 50.0, 40.0],
-    "mesh_subdivision_level": 3,
-    "rotation_period_s": 7200.0,
-    "spin_pole": {
-      "frame": "icrs",
-      "lon_deg": 105.0,
-      "lat_deg": -66.0
-    }
-  },
-  "radar": {
-    "geometry": "bistatic",
-    "carrier_frequency_hz": 7150000000.0,
-    "waveform": {
-      "type": "continuous_wave"
-    },
-    "baseband_sample_rate_hz": 64.0
-  },
-  "observation": {
-    "start_time_utc": "2026-01-01T00:00:00.000",
-    "duration_s": 21600.0
-  },
-  "noise": {
-    "snr_db": 10.0
-  },
-  "processing": {
-    "stft_window_samples": 4096,
-    "stft_overlap_fraction": 0.75
-  }
-}
-```
-
-批量参数扫描通过基线 JSON 加独立 sweep JSON 生成，不在脚本中写死循环取值。
+批量参数扫描以短脚本复制并修改基础字典，不引入配置框架。
 
 ### 5.7 连续波与未来脉冲序列的 seam
 
@@ -320,7 +277,7 @@ A_i(t)\propto
 - `time`：时间轴；
 - `truth`：真实周期、自转轴、初始相位、目标尺度；
 - `geometry`：收发站与目标几何；
-- `config`：完整 JSON 配置、Schema 版本和随机种子；
+- `config`：完整 JSON 配置和随机种子；
 - `components`：可选的逐面元或逐散射中心贡献；
 - `diagnostics`：真实平动多普勒、真实旋转微多普勒范围、瞬时信噪比。
 
@@ -612,61 +569,56 @@ E3～E9 不设置统一通过阈值，其验收要求是：
 3. 明确给出可靠工作区、退化区和不可辨识区；
 4. 所有结论可由保存的汇总数据重新绘图验证。
 
-## 10. 软件结构规划
+## 10. 软件结构
 
-审批后建议建立：
+当前结构：
 
 ```text
 rotation-period-measurement/
 ├── README.md
 ├── README_EN.md
 ├── EXPERIMENTS.md
+├── EXPERIMENT_LOG.md
 ├── environment.yml
 ├── configs/
-│   ├── baseline_cw.json
-│   ├── pulse_irregular_example.json
-│   └── sweeps/
-├── schemas/
-│   └── experiment.schema.json
+│   ├── pointing/
+│   ├── simulation/
+│   └── inversion/
 ├── src/
-│   └── asteroid_rotation/
-│       ├── config.py
-│       ├── geometry.py
-│       ├── mesh_io.py
-│       ├── dynamics.py
-│       ├── ephemeris.py
-│       ├── acquisition.py
-│       ├── scattering.py
-│       ├── echo.py
-│       ├── compensation.py
-│       ├── time_frequency.py
-│       ├── features.py
-│       ├── periodogram.py
-│       ├── inversion.py
-│       ├── uncertainty.py
-│       └── io.py
+│   └── asteroid_radar/
+│       ├── data/
+│       ├── pointing/
+│       ├── simulation/
+│       └── inversion/
 ├── scripts/
-│   ├── simulate.py
-│   ├── estimate_period.py
-│   ├── run_experiment.py
-│   └── make_report.py
+│   ├── pointing/
+│   ├── simulation/
+│   └── inversion/
 ├── tests/
+│   ├── pointing/
+│   ├── simulation/
+│   ├── inversion/
+│   └── integration/
+├── docs/
 ├── outputs/
 └── notebooks/
 ```
 
-核心模块提供稳定 Python API，命令行脚本仅负责编排，不把物理公式和算法隐藏在脚本中。
+仿真输出标准 `EchoDataset`，反演只读取该数据，不导入仿真实现。核心公式放在
+对应研究模块，命令行脚本只负责读取配置、保存数据和绘图。
 
-## 11. 工程与复现要求
+## 11. 科研代码与复现要求
 
 1. Python 命令统一通过 `conda run -n pytorch` 执行。
 2. 有实际加速收益时使用 `cuda:0`，同时保留 CPU 回退。
-3. 批量仿真显示进度条，记录每组实验和总实验耗时。
-4. 所有实验由经过 JSON Schema 校验的 JSON 配置驱动，保存配置快照、Schema 版本、Git 提交号、环境信息和随机种子。
-5. 正式结果与临时文件不纳入 Git；建立 `.gitignore` 忽略输出、缓存、`.claude/`、`CLAUDE.md` 和 `__pycache__/`。
-6. 提供中文 `README.md` 和英文 `README_EN.md`，文件顶部互相链接。
-7. 快速冒烟测试与正式蒙特卡洛实验分别标记，前者不得冒充最终结果。
-8. 图中同时标注真值、估计值和置信区间；不得只展示成功案例。
+3. 代码优先展示公式和数据流，不为正常研究流程中不会出现的输入增加重复校验。
+4. 只保留会影响科学结论的检查，例如混叠、零信号、时间顺序和迭代不收敛。
+5. 所有实验由普通 JSON 配置驱动，保存配置、环境、随机种子和运行耗时。
+6. 仿真与反演分别运行，通过 `EchoDataset` 连接。
+7. 正式结果与临时文件不纳入 Git；`.gitignore` 忽略输出和缓存。
+8. 提供中文与英文 README。
+9. 快速冒烟测试与正式蒙特卡洛实验分别标记。
+10. 图中同时标注真值、估计值和置信区间，不只展示成功案例。
 
 ## 12. 预期交付物
 
@@ -686,7 +638,7 @@ rotation-period-measurement/
 
 ### M1：物理模型与解析验证
 
-- 完成 JSON Schema、坐标、Astropy 时间、刚体旋转、单散射点和椭球多面元回波；
+- 完成简洁JSON配置、坐标、Astropy时间、刚体旋转、单散射点和椭球多面元回波；
 - 完成 E0；
 - 交付解析对照图和测试结果。
 
@@ -757,14 +709,12 @@ rotation-period-measurement/
 
 若复制任何受 MIT 许可证保护的具体代码片段，保留原版权和许可证说明。
 
-## 15. 审批事项
-
-请审批以下方案选择：
+## 15. 已确定的方案
 
 1. 是否批准以三角多面体作为统一实体几何表示，点云仅作为输入或离散散射中心？
 2. 是否批准“解析目标 → 椭球网格 → 真实小行星网格”的验证顺序？
 3. 是否批准当前以 7.15 GHz 连续波为基线，并按第 5.7 节预留非均匀脉冲序列？
-4. 是否批准全部可调参数迁移到 JSON，并使用 JSON Schema 严格校验？
+4. 可调参数使用按研究阶段拆分的普通 JSON，不使用严格 Schema。
 5. 是否批准 Astropy 负责时间与坐标、JPL Horizons 数据负责真实小行星星历的方案？
 6. 是否同意第一阶段使用固定主轴匀速旋转，把非主轴翻滚放入模型失配实验？
 7. 是否同意基线周期取 2 h、观测时长取 6 h，并在参数扫描中覆盖 0.5～12 h？
@@ -772,4 +722,4 @@ rotation-period-measurement/
 9. 是否同意以“粗周期候选 + 物理模型局部反演”为主算法，并将机器学习排除在核心验收之外？
 10. 是否接受第 9 节的精度、成功率与置信区间验收目标？
 
-审批通过后，再进入 M1；若其中任一选择需要修改，应先更新本文件并形成 v0.3 计划。
+以上方案已经进入实施；后续改变核心科学假设时更新本文件版本。

@@ -166,6 +166,118 @@ conda run -n pytorch python -m unittest discover -s tests -v
 - 当前地球质心状态使用 Astropy `builtin` 星历。需要更高精度时，应将配置改为本地 JPL SPK 星历并验证其覆盖期。
 - Horizons 查询依赖网络。正式可复现实验应把所用几何状态或 Horizons 原始响应固化为本地数据。
 
+## 2026-07-30 14:50–15:46：按科研流程重构与代码精简
+
+### 重构原因
+
+- 原 `asteroid_rotation` 包把目标几何、回波生成、信号处理和周期估计平铺在
+  同一目录，`experiment.py`又把仿真与反演连成一个整体，不利于单独理解和
+  验证各研究阶段。
+- 两套严格JSON Schema、配置对象和大量输入类型/形状检查遮挡了公式主体，
+  不符合当前快速验证科研想法的目标。
+- 视线解算虽然已经单独成包，但配置、脚本和测试仍与主项目平铺，项目入口
+  不够直观。
+
+### 新结构
+
+统一包名改为`asteroid_radar`，按研究任务划分：
+
+```text
+src/asteroid_radar/
+├── data/
+├── pointing/
+├── simulation/
+└── inversion/
+```
+
+配置、脚本和测试采用相同分组：
+
+```text
+configs/{pointing,simulation,inversion}/
+scripts/{pointing,simulation,inversion}/
+tests/{pointing,simulation,inversion,integration}/
+```
+
+新增`docs/architecture.md`以及三个模块的阅读说明。
+
+### 模块接口
+
+- 回波仿真：`simulate(config) -> EchoDataset`
+- 自转反演：`estimate_rotation(echo, config) -> InversionResult`
+- 仿真与反演之间只通过`EchoDataset`/`echo.npz`连接。
+- 光行时模块继续输出`LightTimeSolution`，不强制依赖仿真模块。
+
+### 精简内容
+
+- 删除`jsonschema`依赖以及`schemas/`中的两份Schema。
+- 删除`asteroid_rotation.config`和`asteroid_pointing.config`配置加载器。
+- 脚本直接使用`json.loads`读取普通配置字典。
+- 删除重复的数值类型、数组维数、字段存在性、正数范围和未知字段校验。
+- 删除只测试配置非法输入的测试。
+- 当前核心源码共950行；显式科研异常只剩3处：
+  1. 多普勒超过Nyquist；
+  2. 当前照射几何产生零回波；
+  3. 光行时迭代不收敛。
+- 清理旧包目录及生成的`__pycache__`。
+
+### 保留的科学行为
+
+- PyTorch3D三角网格、OBJ/PLY读取、CPU双精度和CUDA单精度路径；
+- 面元相干连续波回波；
+- 非均匀时间数据结构；
+- 平动多普勒补偿、STFT和谱特征；
+- Lomb–Scargle周期候选及半/双周期候选；
+- 三事件双程光行时和两条视线。
+
+### 回归测试
+
+- 13项面向科学行为的测试全部通过。
+- 测试覆盖仿真输出文件被反演读取，确保两个模块在文件seam处真实连接。
+- CUDA/CPU回波相对RMS误差仍小于 \(2\times10^{-4}\)。
+- 解析旋转多普勒、非均匀周期和三事件光行时测试保持通过。
+
+### 基线对照
+
+重构后独立运行回波仿真：
+
+```powershell
+conda run -n pytorch python scripts\simulation\run_cw.py
+```
+
+- 1280个面元；
+- 345600个复采样；
+- CUDA回波生成3.442 s；
+- 重构前为5.416 s。
+
+随后独立运行反演：
+
+```powershell
+conda run -n pytorch python scripts\inversion\estimate_period.py
+```
+
+周期结果与重构前一致：
+
+| 特征 | 重构前 | 重构后 |
+|---|---:|---:|
+| 回波总功率 | 7100.5868 s | 7100.5868 s |
+| RMS带宽 | 7148.7055 s | 7148.7055 s |
+| 频谱质心 | 7081.0327 s | 7081.0327 s |
+
+新结果保存在`outputs/refactor/simulation/`和
+`outputs/refactor/inversion/`。
+
+### 光行时回归
+
+新入口：
+
+```powershell
+conda run -n pytorch python scripts\pointing\solve.py
+```
+
+433 Eros的发射、反射、接收时刻、双程光时、距离和两条视线与重构前完全
+一致。结果保存在`outputs/refactor/pointing/eros.json`。IERS覆盖期不足的
+方位俯仰警告仍然保留并记录，不做静默隐藏。
+
 ## 日志维护规则
 
 以后每次修改至少记录：

@@ -1,0 +1,16 @@
+{
+  "target": "433",
+  "target_id_type": "smallbody",
+  "observation_time_utc": "2026-07-30T12:00:00",
+  "time_role": "receive",
+  "transmit_station": {
+    "name": "Example monostatic radar",
+    "longitude_deg": 116.0,
+    "latitude_deg": 40.0,
+    "height_m": 100.0
+  },
+  "earth_ephemeris": "builtin",
+  "horizons_cache": "tmp/astroquery_cache",
+  "tolerance_s": 1e-7,
+  "max_iterations": 20
+}
