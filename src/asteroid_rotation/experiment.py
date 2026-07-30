@@ -34,10 +34,12 @@ class ContinuousWaveExperimentResult:
 
 def build_mesh(config: ExperimentConfig) -> SurfaceMesh:
     target = config.section("target")
+    compute = config.section("compute")
     mesh = SurfaceMesh.ellipsoid(
         target["semi_axes_m"],
-        target["mesh_latitude_segments"],  # 这个是啥呀
-        target["mesh_longitude_segments"],
+        target["mesh_subdivision_level"],
+        device=compute["device"],
+        dtype=compute["dtype"],
     )
     scattering = target["scattering"]
     return mesh.with_scattering_spot(
@@ -154,4 +156,3 @@ def run_continuous_wave_experiment(
         features=features,
         period_estimates=estimates,
     )
-

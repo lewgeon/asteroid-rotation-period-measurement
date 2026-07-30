@@ -4,9 +4,11 @@ channels:
 dependencies:
   - python>=3.9
   - astropy
+  - astroquery
   - jsonschema
   - matplotlib
   - numpy
   - scipy
+  - pytorch
+  - pytorch3d
   - tqdm
-

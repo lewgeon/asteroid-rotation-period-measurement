@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
+import torch
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 
@@ -61,23 +62,35 @@ class SpinState:
     def angular_velocity_icrs(self) -> np.ndarray:
         return self.angular_rate_rad_s * self.axis_icrs
 
-    def phases(self, elapsed_s: np.ndarray) -> np.ndarray:
+    def phases(
+        self, elapsed_s: np.ndarray | torch.Tensor
+    ) -> np.ndarray | torch.Tensor:
+        if isinstance(elapsed_s, torch.Tensor):
+            return self.initial_phase_rad + self.angular_rate_rad_s * elapsed_s
         elapsed = np.asarray(elapsed_s, dtype=np.float64)
         return self.initial_phase_rad + self.angular_rate_rad_s * elapsed
 
-    def rotate_body_vectors(self, vectors: np.ndarray, phases_rad: np.ndarray) -> np.ndarray:
-        """Rotate body-frame vectors for every phase; output shape is (T, N, 3)."""
+    def rotate_body_vectors(
+        self,
+        vectors: torch.Tensor,
+        phases_rad: torch.Tensor,
+    ) -> torch.Tensor:
+        """Rotate Torch body-frame vectors; output shape is (T, N, 3)."""
 
-        body_vectors = np.asarray(vectors, dtype=np.float64)
-        if body_vectors.ndim != 2 or body_vectors.shape[1] != 3:
+        if vectors.ndim != 2 or vectors.shape[1] != 3:
             raise ValueError("vectors must have shape (N, 3)")
-        phases = np.asarray(phases_rad, dtype=np.float64).reshape(-1)
-        cosine = np.cos(phases)[:, None]
-        sine = np.sin(phases)[:, None]
-        x = cosine * body_vectors[None, :, 0] - sine * body_vectors[None, :, 1]
-        y = sine * body_vectors[None, :, 0] + cosine * body_vectors[None, :, 1]
-        z = np.broadcast_to(body_vectors[None, :, 2], x.shape)
-        rotated_body = np.stack((x, y, z), axis=-1)
-        basis = body_to_icrs_basis(self.axis_icrs)
+        if not vectors.is_floating_point():
+            raise ValueError("vectors must use a floating Torch dtype")
+        phases = phases_rad.to(device=vectors.device, dtype=vectors.dtype).reshape(-1)
+        cosine = torch.cos(phases)[:, None]
+        sine = torch.sin(phases)[:, None]
+        x = cosine * vectors[None, :, 0] - sine * vectors[None, :, 1]
+        y = sine * vectors[None, :, 0] + cosine * vectors[None, :, 1]
+        z = vectors[None, :, 2].expand_as(x)
+        rotated_body = torch.stack((x, y, z), dim=-1)
+        basis = torch.as_tensor(
+            body_to_icrs_basis(self.axis_icrs),
+            device=vectors.device,
+            dtype=vectors.dtype,
+        )
         return rotated_body @ basis.T
-

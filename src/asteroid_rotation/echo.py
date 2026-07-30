@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 import numpy as np
+import torch
 
 from .acquisition import AcquisitionSchedule
 from .dynamics import SpinState, normalize_vector
@@ -37,6 +38,18 @@ class RadarGeometry:
     @property
     def bistatic_projection_vector(self) -> np.ndarray:
         return self.tx_line_of_sight_icrs + self.rx_line_of_sight_icrs
+
+    def torch_vectors(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            torch.as_tensor(
+                self.tx_line_of_sight_icrs, device=device, dtype=dtype
+            ),
+            torch.as_tensor(
+                self.rx_line_of_sight_icrs, device=device, dtype=dtype
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -73,16 +86,29 @@ def integrated_polynomial_phase_rad(
 
 
 def rotational_doppler_hz(
-    positions_icrs_m: np.ndarray,
-    angular_velocity_icrs_rad_s: np.ndarray,
+    positions_icrs_m: torch.Tensor,
+    angular_velocity_icrs_rad_s: torch.Tensor,
     geometry: RadarGeometry,
     wavelength_m: float,
-) -> np.ndarray:
+) -> torch.Tensor:
     """Instantaneous rotational Doppler under the positive-phase convention."""
 
-    positions = np.asarray(positions_icrs_m, dtype=np.float64)
-    velocity = np.cross(angular_velocity_icrs_rad_s, positions)
-    return velocity @ geometry.bistatic_projection_vector / wavelength_m
+    if positions_icrs_m.ndim != 2 or positions_icrs_m.shape[1] != 3:
+        raise ValueError("positions_icrs_m must have shape (N, 3)")
+    angular_velocity = angular_velocity_icrs_rad_s.to(
+        device=positions_icrs_m.device, dtype=positions_icrs_m.dtype
+    )
+    velocity = torch.linalg.cross(
+        angular_velocity.expand_as(positions_icrs_m),
+        positions_icrs_m,
+        dim=1,
+    )
+    projection = torch.as_tensor(
+        geometry.bistatic_projection_vector,
+        device=positions_icrs_m.device,
+        dtype=positions_icrs_m.dtype,
+    )
+    return velocity @ projection / wavelength_m
 
 
 def maximum_rotation_doppler_bound_hz(
@@ -168,37 +194,57 @@ def simulate_continuous_wave_echo(
     translation_phase = integrated_polynomial_phase_rad(
         translation_coefficients_hz, elapsed_s
     )
-    clean = np.zeros(len(elapsed_s), dtype=np.complex128)
-    projection = geometry.bistatic_projection_vector
-    direction_to_tx = -geometry.tx_line_of_sight_icrs
-    direction_to_rx = -geometry.rx_line_of_sight_icrs
+    device = mesh.device
+    dtype = mesh.dtype
+    complex_dtype = torch.complex64 if dtype == torch.float32 else torch.complex128
+    clean_tensor = torch.zeros(
+        len(elapsed_s), device=device, dtype=complex_dtype
+    )
+    tx_line_of_sight, rx_line_of_sight = geometry.torch_vectors(device, dtype)
+    projection = tx_line_of_sight + rx_line_of_sight
+    direction_to_tx = -tx_line_of_sight
+    direction_to_rx = -rx_line_of_sight
     face_scale = mesh.face_areas * mesh.scattering
-    normalization = max(float(mesh.face_areas.sum()), np.finfo(np.float64).eps)
+    normalization = torch.clamp(
+        mesh.face_areas.sum(), min=torch.finfo(dtype).eps
+    )
+    translation_phase_tensor = torch.as_tensor(
+        translation_phase, device=device, dtype=dtype
+    )
 
     total_chunks = (len(elapsed_s) + chunk_size - 1) // chunk_size
-    for chunk_index, start in enumerate(range(0, len(elapsed_s), chunk_size)):
-        stop = min(start + chunk_size, len(elapsed_s))
-        phases = spin.phases(elapsed_s[start:stop])
-        positions = spin.rotate_body_vectors(mesh.face_centroids, phases)
-        normals = spin.rotate_body_vectors(mesh.face_normals, phases)
+    with torch.no_grad():
+        for chunk_index, start in enumerate(range(0, len(elapsed_s), chunk_size)):
+            stop = min(start + chunk_size, len(elapsed_s))
+            elapsed_chunk = torch.as_tensor(
+                elapsed_s[start:stop], device=device, dtype=dtype
+            )
+            phases = spin.phases(elapsed_chunk)
+            positions = spin.rotate_body_vectors(mesh.face_centroids, phases)
+            normals = spin.rotate_body_vectors(mesh.face_normals, phases)
 
-        illumination = np.clip(normals @ direction_to_tx, 0.0, None)
-        reception = np.clip(normals @ direction_to_rx, 0.0, None)
-        amplitude = (
-            face_scale[None, :]
-            * illumination**cosine_power_tx
-            * reception**cosine_power_rx
-        )
-        relative_path_phase = 2.0 * np.pi * (positions @ projection) / wavelength_m
-        facet_echo = amplitude * np.exp(1j * relative_path_phase)
-        clean[start:stop] = (
-            facet_echo.sum(axis=1)
-            / normalization
-            * np.exp(1j * translation_phase[start:stop])
-        )
-        if progress_callback is not None:
-            progress_callback(chunk_index + 1, total_chunks)
+            illumination = torch.clamp(normals @ direction_to_tx, min=0.0)
+            reception = torch.clamp(normals @ direction_to_rx, min=0.0)
+            amplitude = (
+                face_scale[None, :]
+                * illumination**cosine_power_tx
+                * reception**cosine_power_rx
+            )
+            relative_path_phase = (
+                2.0 * np.pi * (positions @ projection) / wavelength_m
+            )
+            facet_echo = amplitude.to(complex_dtype) * torch.exp(
+                1j * relative_path_phase
+            )
+            clean_tensor[start:stop] = (
+                facet_echo.sum(dim=1)
+                / normalization
+                * torch.exp(1j * translation_phase_tensor[start:stop])
+            )
+            if progress_callback is not None:
+                progress_callback(chunk_index + 1, total_chunks)
 
+    clean = clean_tensor.detach().cpu().numpy()
     clean = np.where(schedule.valid_mask, clean, 0.0)
     if snr_db is None:
         observed = clean.copy()
@@ -224,4 +270,3 @@ def simulate_continuous_wave_echo(
         snr_db=snr_db,
         max_rotation_doppler_bound_hz=rotation_bound,
     )
-

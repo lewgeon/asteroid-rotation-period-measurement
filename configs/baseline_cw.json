@@ -4,11 +4,15 @@
     "name": "cw_ellipsoid_baseline",
     "seed": 20250729
   },
+  "compute": {
+    "backend": "pytorch3d",
+    "device": "auto",
+    "dtype": "float32"
+  },
   "target": {
     "model_type": "ellipsoid_mesh",
     "semi_axes_m": [70.0, 50.0, 40.0],
-    "mesh_latitude_segments": 12,
-    "mesh_longitude_segments": 24,
+    "mesh_subdivision_level": 3,
     "rotation_period_s": 7200.0,
     "initial_phase_deg": 17.0,
     "spin_pole": {

@@ -14,9 +14,10 @@ class EndToEndTests(unittest.TestCase):
         baseline = load_experiment_config(ROOT / "configs" / "baseline_cw.json")
         data = copy.deepcopy(baseline.data)
         data["experiment"]["seed"] = 11
+        data["compute"]["device"] = "cpu"
+        data["compute"]["dtype"] = "float64"
         data["target"]["semi_axes_m"] = [1.0, 0.72, 0.55]
-        data["target"]["mesh_latitude_segments"] = 6
-        data["target"]["mesh_longitude_segments"] = 12
+        data["target"]["mesh_subdivision_level"] = 1
         data["target"]["rotation_period_s"] = 20.0
         data["target"]["scattering"]["spot_angular_radius_deg"] = 45.0
         data["target"]["scattering"]["spot_strength"] = 10.0
@@ -44,4 +45,3 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

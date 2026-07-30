@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+import torch
 
 from asteroid_rotation.acquisition import AcquisitionSchedule
 from asteroid_rotation.echo import RadarGeometry, rotational_doppler_hz
@@ -18,8 +19,8 @@ class DynamicsAndEchoTests(unittest.TestCase):
         np.testing.assert_allclose(schedule.elapsed_s, [0.0, 1.25, 4.0], atol=1e-9)
 
     def test_rotational_doppler_matches_analytic_case(self):
-        positions = np.array([[1.0, 0.0, 0.0]])
-        angular_velocity = np.array([0.0, 0.0, 2.0])
+        positions = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64)
+        angular_velocity = torch.tensor([0.0, 0.0, 2.0], dtype=torch.float64)
         geometry = RadarGeometry(
             tx_line_of_sight_icrs=np.array([0.0, 1.0, 0.0]),
             rx_line_of_sight_icrs=np.array([0.0, 1.0, 0.0]),
@@ -30,9 +31,10 @@ class DynamicsAndEchoTests(unittest.TestCase):
             geometry,
             wavelength_m=0.5,
         )
-        np.testing.assert_allclose(doppler, [8.0], atol=1e-12)
+        torch.testing.assert_close(
+            doppler, torch.tensor([8.0], dtype=torch.float64), atol=1e-12, rtol=0
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

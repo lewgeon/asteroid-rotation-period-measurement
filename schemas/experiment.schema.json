@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "experiment",
+    "compute",
     "target",
     "radar",
     "observation",
@@ -26,14 +27,23 @@
         "seed": {"type": "integer", "minimum": 0}
       }
     },
+    "compute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "device", "dtype"],
+      "properties": {
+        "backend": {"const": "pytorch3d"},
+        "device": {"enum": ["auto", "cpu", "cuda:0"]},
+        "dtype": {"enum": ["float32", "float64"]}
+      }
+    },
     "target": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "model_type",
         "semi_axes_m",
-        "mesh_latitude_segments",
-        "mesh_longitude_segments",
+        "mesh_subdivision_level",
         "rotation_period_s",
         "initial_phase_deg",
         "spin_pole",
@@ -50,8 +60,11 @@
           ],
           "items": false
         },
-        "mesh_latitude_segments": {"type": "integer", "minimum": 4},
-        "mesh_longitude_segments": {"type": "integer", "minimum": 8},
+        "mesh_subdivision_level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
         "rotation_period_s": {"type": "number", "exclusiveMinimum": 0},
         "initial_phase_deg": {"type": "number"},
         "spin_pole": {
@@ -188,4 +201,3 @@
     }
   }
 }
-

@@ -143,6 +143,9 @@ def main() -> int:
         "truth_period_s": truth_period_s,
         "runtime_s": elapsed,
         "face_count": int(len(result.mesh.faces)),
+        "mesh_backend": "pytorch3d",
+        "compute_device": str(result.mesh.device),
+        "compute_dtype": str(result.mesh.dtype).replace("torch.", ""),
         "sample_count": int(len(result.echo.iq)),
         "sample_rate_hz": result.echo.sample_rate_hz,
         "max_rotation_doppler_bound_hz": result.echo.max_rotation_doppler_bound_hz,
@@ -173,4 +176,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -9,10 +9,12 @@ description = "Physics-based asteroid radar echo simulation and rotation-period 
 requires-python = ">=3.9"
 dependencies = [
   "astropy",
+  "astroquery",
   "jsonschema",
   "matplotlib",
   "numpy",
   "scipy",
+  "torch",
   "tqdm",
 ]
 
@@ -21,4 +23,3 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
