@@ -1,93 +1,70 @@
 # 项目结构
 
-## 模块与数据流
+## 文件布局
 
 ```text
-src/asteroid_radar/
-├── data/         模块间共享的数据
-├── pointing/     星历、光行时和视线
-├── simulation/   回波前向模型
-└── inversion/    自转参数反演
+rotation-period-measurement/
+├── models/
+│   └── ellipsoid.obj
+├── configs/
+│   ├── echo.json
+│   ├── inversion.json
+│   └── pointing.json
+├── scripts/
+│   ├── make_ellipsoid.py
+│   ├── simulate_echo.py
+│   ├── estimate_period.py
+│   └── solve_pointing.py
+├── src/asteroid_radar/
+│   ├── ellipsoid.py
+│   ├── mesh.py
+│   ├── motion.py
+│   ├── echo.py
+│   ├── dataset.py
+│   ├── signal.py
+│   ├── inversion.py
+│   ├── ephemeris.py
+│   └── pointing.py
+└── tests/
+    ├── test_mesh.py
+    ├── test_echo.py
+    ├── test_inversion.py
+    ├── test_00_pointing.py
+    └── test_z_backend.py
 ```
 
-依赖方向是单向的：
+## 形状与回波的seam
 
 ```text
-pointing ──> PointingSolution
-                   │
-                   ▼
-simulation ──> EchoDataset ──> inversion
+椭球参数 ──> make_ellipsoid.py ──> ellipsoid.obj
+真实模型 ──> 模型准备 ───────────> asteroid.obj
+                                      │
+                                      ▼
+                             configs/echo.json
+                                      │
+                                      ▼
+                                  echo.py
 ```
 
-当前仿真可以直接读取固定视线。后续整合真实星历时，只把
-`PointingSolution`中的视线转换为仿真配置，不让仿真代码直接调用Horizons。
+`echo.py`只读取`model_path`，不知道模型是椭球还是真实小行星。OBJ/PLY是形状
+准备与回波仿真之间的seam。
 
-## data
-
-公共接口是：
-
-```python
-EchoDataset
-save_echo(path, echo)
-load_echo(path)
-```
-
-`EchoDataset`包含复回波、时间、有效样本、相干段、平动多普勒和少量实验
-元数据。它是仿真与反演之间唯一的seam。
-
-## pointing
-
-公共结果是`LightTimeSolution`。模块内部负责：
-
-- JPL Horizons几何状态；
-- 地面站太阳系质心状态；
-- 发射、反射、接收时刻；
-- ICRS和本地方位俯仰。
-
-核心算法位于`pointing/solver.py`。
-
-## simulation
-
-公共接口只有：
-
-```python
-echo = simulate(config)
-```
-
-内部文件按公式含义划分：
-
-- `geometry.py`：三角网格；
-- `motion.py`：自转与坐标基；
-- `cw.py`：连续波面元相干叠加；
-- `experiment.py`：从配置构造一次仿真。
-
-该模块不导入`inversion`。
-
-## inversion
-
-公共接口只有：
-
-```python
-result = estimate_rotation(echo, config)
-```
-
-内部目前分为：
-
-- `time_frequency.py`：平动多普勒补偿、STFT和谱特征；
-- `period.py`：Lomb–Scargle及谐波候选；
-- `estimate.py`：组织一次反演。
-
-物理模型局部反演以后在本模块内部增加，不改变`EchoDataset`。
-
-## 配置和脚本
-
-配置、脚本和测试都按同样的研究阶段排列：
+## 仿真与反演的seam
 
 ```text
-configs/{pointing,simulation,inversion}/
-scripts/{pointing,simulation,inversion}/
-tests/{pointing,simulation,inversion,integration}/
+echo.py ──> EchoDataset/echo.npz ──> inversion.py
 ```
 
-配置是普通JSON。研究者直接查看配置和算法文件即可，不需要先理解Schema、
-依赖注入框架或配置对象。
+`EchoDataset`定义在`dataset.py`。反演不导入`mesh.py`、`motion.py`或
+`echo.py`。
+
+## 视线模块
+
+`ephemeris.py`负责返回目标和测站的太阳系质心状态，`pointing.py`只负责三
+事件光行时方程和视线。视线目前独立运行；以后接入回波时，把计算结果写入
+`echo.json`中的`tx_los_icrs`和`rx_los_icrs`即可。
+
+## 为什么不拆成多个项目
+
+三个研究任务共享时间、坐标、数据和实验日志，仍属于同一科学链路。当前用
+平坦文件保持可见性；只有模块需要独立发布或由不同团队维护时才拆仓库。

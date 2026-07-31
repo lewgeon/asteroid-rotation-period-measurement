@@ -1,7 +1,7 @@
 # 小行星雷达回波自转周期测量实验计划
 
 > 状态：已批准，实施中  
-> 计划版本：v0.3  
+> 计划版本：v0.4  
 > 依据：Calvés 等（2025）的连续波雷达、微多普勒分析和层析处理思路  
 > 本阶段范围：仅定义实验方案、软件边界、实验矩阵和验收标准；审批前不进入实现
 >
@@ -14,6 +14,8 @@
 > 2026-07-30 光行时扩展：新增独立三事件解算器，使用 JPL Horizons 的太阳系质心几何状态和 Astropy 地面站状态，迭代求解发射、反射、接收时刻，并分别输出发射与接收视线。该工具尚未并入连续波回波主链路。完整变更记录见 [EXPERIMENT_LOG.md](EXPERIMENT_LOG.md)。
 
 > 2026-07-30 v0.3：按科研流程重构为 `pointing`、`simulation`、`inversion` 和 `data` 四个模块。删除严格 JSON Schema 与重复输入防御逻辑；仿真和反演通过 `EchoDataset` 文件连接，可分别运行和验证。只保留会直接影响科研结论的检查。
+
+> 2026-07-30 v0.4：进一步改为扁平源码。形状生成与回波仿真完全分离；仿真配置只指定标准 OBJ/PLY 的 `model_path`。椭球先由独立脚本生成 OBJ，真实小行星模型可以直接替换路径。配置、脚本和测试不再重复建立阶段子目录。
 
 ## 1. 项目目标
 
@@ -223,11 +225,11 @@ A_i(t)\propto
 ### 5.6 简洁 JSON 配置
 
 可调实验参数继续保存在 JSON 中，但不再使用 JSON Schema、配置对象和逐字段
-防御性校验。配置按研究阶段分开：
+防御性校验。配置保持为三个平坦文件：
 
-- `configs/pointing/`：星历、测站和观测时间；
-- `configs/simulation/`：目标、雷达、采样和噪声；
-- `configs/inversion/`：STFT和周期搜索参数。
+- `configs/pointing.json`：星历、测站和观测时间；
+- `configs/echo.json`：模型路径、目标运动、雷达、采样和噪声；
+- `configs/inversion.json`：STFT和周期搜索参数。
 
 参数名显式写出单位。研究脚本直接通过 `json.loads` 读取字典，让配置值到
 公式变量的对应关系保持可见。仅在错误会静默破坏科研结论时检查，例如采样
@@ -580,32 +582,41 @@ rotation-period-measurement/
 ├── EXPERIMENTS.md
 ├── EXPERIMENT_LOG.md
 ├── environment.yml
+├── models/
+│   └── ellipsoid.obj
 ├── configs/
-│   ├── pointing/
-│   ├── simulation/
-│   └── inversion/
+│   ├── echo.json
+│   ├── inversion.json
+│   └── pointing.json
 ├── src/
 │   └── asteroid_radar/
-│       ├── data/
-│       ├── pointing/
-│       ├── simulation/
-│       └── inversion/
+│       ├── ellipsoid.py
+│       ├── mesh.py
+│       ├── motion.py
+│       ├── echo.py
+│       ├── dataset.py
+│       ├── signal.py
+│       ├── inversion.py
+│       ├── ephemeris.py
+│       └── pointing.py
 ├── scripts/
-│   ├── pointing/
-│   ├── simulation/
-│   └── inversion/
+│   ├── make_ellipsoid.py
+│   ├── simulate_echo.py
+│   ├── estimate_period.py
+│   └── solve_pointing.py
 ├── tests/
-│   ├── pointing/
-│   ├── simulation/
-│   ├── inversion/
-│   └── integration/
+│   ├── test_mesh.py
+│   ├── test_echo.py
+│   ├── test_inversion.py
+│   ├── test_00_pointing.py
+│   └── test_z_backend.py
 ├── docs/
 ├── outputs/
 └── notebooks/
 ```
 
-仿真输出标准 `EchoDataset`，反演只读取该数据，不导入仿真实现。核心公式放在
-对应研究模块，命令行脚本只负责读取配置、保存数据和绘图。
+OBJ/PLY是模型准备与回波仿真之间的seam；`EchoDataset`是仿真与反演之间的
+seam。命令行脚本只负责读取配置、保存数据和绘图。
 
 ## 11. 科研代码与复现要求
 

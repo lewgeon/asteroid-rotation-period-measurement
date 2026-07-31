@@ -2,25 +2,23 @@
 
 # Asteroid Radar Rotation Research
 
-This project studies continuous-wave radar echoes from rotating asteroids and
-rotation-period estimation from those echoes.
+The project studies CW radar echo simulation, rotation-period inversion, and
+light-time-corrected radar pointing.
 
-The code follows the research workflow:
+The source tree is intentionally flat:
 
 ```text
-pointing  ──> observing geometry
-                     ↓
-simulation ──> EchoDataset ──> inversion
+src/asteroid_radar/
+├── ellipsoid.py
+├── mesh.py
+├── motion.py
+├── echo.py
+├── dataset.py
+├── signal.py
+├── inversion.py
+├── ephemeris.py
+└── pointing.py
 ```
-
-- `pointing`: ephemerides, two-way light time, transmit/receive directions;
-- `simulation`: meshes, rigid rotation, scattering, and CW echoes;
-- `inversion`: Doppler compensation, time-frequency features, period candidates;
-- `data`: the `EchoDataset` passed between modules.
-
-See [docs/architecture.md](docs/architecture.md) for the structure,
-[EXPERIMENTS.md](EXPERIMENTS.md) for the experiment plan, and
-[EXPERIMENT_LOG.md](EXPERIMENT_LOG.md) for implementation history.
 
 ## Environment
 
@@ -29,37 +27,42 @@ conda activate pytorch
 $env:PYTHONPATH="$PWD\src"
 ```
 
-## Run the stages
-
-Generate a CW echo:
+Generate the baseline OBJ model:
 
 ```powershell
-conda run -n pytorch python scripts\simulation\run_cw.py
+conda run -n pytorch python scripts\make_ellipsoid.py `
+  --axes 70 50 40 --subdivisions 3 `
+  --output models\ellipsoid.obj
 ```
 
-Estimate period candidates from the saved echo:
+Generate an echo, estimate its period, and solve pointing:
 
 ```powershell
-conda run -n pytorch python scripts\inversion\estimate_period.py
+conda run -n pytorch python scripts\simulate_echo.py
+conda run -n pytorch python scripts\estimate_period.py
+conda run -n pytorch python scripts\solve_pointing.py
 ```
 
-Solve light-time-corrected pointing independently:
+The echo configuration contains only a shape path:
+
+```json
+"model_path": "models/ellipsoid.obj"
+```
+
+Replacing it with a prepared real-asteroid OBJ/PLY requires no simulation-code
+changes. Meshes are assumed to use metres, a body-fixed frame, an origin at the
+rotation centre, outward face winding, and nondegenerate triangles.
+
+Run the 12 scientific tests:
 
 ```powershell
-conda run -n pytorch python scripts\pointing\solve.py
+conda run --no-capture-output -n pytorch python -m unittest discover -s tests -v
 ```
 
-Run the 13 scientific-behaviour tests:
+The 1,280-facet baseline produces 345,600 complex samples on CUDA in about
+2.13 s. Its RMS-bandwidth period estimate remains 7148.71 s for a 7200 s truth.
 
-```powershell
-conda run -n pytorch python -m unittest discover -s tests -v
-```
-
-The refactored CUDA simulation produces 345,600 complex samples from 1,280
-facets in approximately 3.44 s. The RMS-bandwidth period estimate remains
-7148.71 s for a 7200 s truth value (0.712% relative error).
-
-The code deliberately favors readable research logic over product-level input
-validation. Checks are retained only where failure could silently invalidate a
-scientific result, such as Doppler aliasing, zero echo power, or failure of the
-light-time iteration.
+See [docs/architecture.md](docs/architecture.md),
+[EXPERIMENTS.md](EXPERIMENTS.md), and
+[EXPERIMENT_LOG.md](EXPERIMENT_LOG.md) for structure, experiment design, and
+history.

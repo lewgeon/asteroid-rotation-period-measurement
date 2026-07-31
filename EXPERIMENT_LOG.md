@@ -278,6 +278,73 @@ conda run -n pytorch python scripts\pointing\solve.py
 一致。结果保存在`outputs/refactor/pointing/eros.json`。IERS覆盖期不足的
 方位俯仰警告仍然保留并记录，不做静默隐藏。
 
+## 2026-07-30 16:50–18:26：形状解耦与目录扁平化
+
+### 修改原因
+
+- `configs/simulation/cw_ellipsoid.json`仍直接包含椭球长短轴和细分等级，
+  导致回波实验构造代码必须知道模型是椭球，换用真实小行星时不能只替换数据。
+- `configs`、`scripts`、`src`和`tests`重复建立
+  `pointing/simulation/inversion`子目录，对当前规模的科研项目造成不必要的
+  路径跳转。
+
+### 形状生成与仿真解耦
+
+- 新增`ellipsoid.py`和`scripts/make_ellipsoid.py`。
+- 使用参数`[70, 50, 40] m`和三级icosphere细分生成
+  `models/ellipsoid.obj`，包含1280个三角面元。
+- `configs/echo.json`不再包含椭球半轴或细分等级，只包含：
+
+```json
+"model_path": "models/ellipsoid.obj"
+```
+
+- `echo.py`只通过`mesh.load_mesh()`读取OBJ/PLY，不知道形状来源。
+- 真实小行星模型只要满足米制、体固坐标、旋转中心位于原点和法向朝外的
+  约定，即可通过修改路径接入。
+- 模型加载阶段不再自动平移质心或翻转面片，避免悄悄改变真实模型的物理
+  坐标。
+
+### 扁平化
+
+删除`data/pointing/simulation/inversion`源码子包，改为十个直接可读文件：
+
+```text
+dataset.py, ellipsoid.py, mesh.py, motion.py, echo.py,
+signal.py, inversion.py, ephemeris.py, pointing.py, __init__.py
+```
+
+配置改为`echo.json`、`inversion.json`和`pointing.json`；脚本改为
+`make_ellipsoid.py`、`simulate_echo.py`、`estimate_period.py`和
+`solve_pointing.py`；测试也改为根目录下按文件名区分。
+
+核心源码由上一版950行减少到789行。
+
+### 依赖简化
+
+- `asteroid_radar.__init__`不再为了便捷导入而提前加载PyTorch3D和SciPy。
+- 回波时间表移除Astropy依赖，使用UTC字符串和NumPy时间差。
+- Astropy只保留在星历和视线文件中。
+- `pointing.py`显式关闭IERS自动下载，避免离线测试隐式联网。
+
+### 测试与回归
+
+- 12项测试全部通过，耗时约1.44 s。
+- 测试临时生成低细分椭球OBJ，直接验证“生成模型→读取模型→生成回波”的
+  文件seam。
+- 正式CUDA基线：
+  - 1280面元；
+  - 345600个复采样；
+  - 回波生成2.128 s。
+- 三个最佳周期与改造前保持一致：
+  - 总功率：7100.5868 s；
+  - RMS带宽：7148.7055 s；
+  - 频谱质心：7081.0327 s。
+- OBJ文本化使周期图得分出现约 \(10^{-6}\) 量级浮点变化，但不改变候选
+  周期。
+- 433 Eros双程光时仍为1484.0265224 s，和改造前差值为0。
+- 新结果位于`outputs/flat/`。
+
 ## 日志维护规则
 
 以后每次修改至少记录：
