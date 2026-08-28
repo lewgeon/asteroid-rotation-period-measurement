@@ -20,3 +20,6 @@ build/
 dist/
 *.egg-info/
 
+.vscode/
+scripts/
+tests/

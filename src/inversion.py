@@ -1,11 +1,22 @@
 """Coarse rotation-period inversion from a saved EchoDataset."""
 
 from dataclasses import dataclass
+import importlib.util
+from pathlib import Path
 
 import numpy as np
 from scipy import signal
 
-from .signal import compensate, spectral_features, stft
+try:
+    from .signal import compensate, spectral_features, stft
+except ImportError:  # 支持 PYTHONPATH=src 时按单文件模块运行脚本。
+    signal_path = Path(__file__).with_name("signal.py")
+    spec = importlib.util.spec_from_file_location("asteroid_radar_signal", signal_path)
+    local_signal = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(local_signal)
+    compensate = local_signal.compensate
+    spectral_features = local_signal.spectral_features
+    stft = local_signal.stft
 
 
 @dataclass
@@ -36,13 +47,18 @@ def lomb_scargle(times, values, min_period, max_period, grid_size):
     times, values = times[finite], values[finite]
     order = np.argsort(times)
     times, values = times[order], values[order]
-    values = (values - values.mean()) / values.std()
+    std = values.std()
+    if len(values) < 3 or std == 0:
+        raise ValueError("周期估计需要至少 3 个非恒定有效特征样本")
+    values = (values - values.mean()) / std
     frequencies = np.linspace(1 / max_period, 1 / min_period, grid_size)
     scores = signal.lombscargle(
         times - times[0], values, 2 * np.pi * frequencies, normalize=True
     )
     periods = 1 / frequencies
     peaks, _ = signal.find_peaks(scores)
+    if len(peaks) == 0:
+        peaks = np.array([int(np.argmax(scores))])
     peaks = peaks[np.argsort(scores[peaks])[::-1]][:5]
     candidates = tuple(
         PeriodCandidate(float(periods[i]), float(scores[i]), "lomb_scargle")
@@ -64,10 +80,25 @@ def add_harmonics(estimate, min_period, max_period):
     return estimate
 
 
+def translation_coefficients_hz(echo, config):
+    """Return optional legacy translation-Doppler coefficients.
+
+    New echo-module datasets already include the full centroid path phase and do
+    not write ``translation_coefficients_hz``. In that case inversion should run
+    directly on the saved complex echo instead of failing on the removed field.
+    """
+
+    if "translation_coefficients_hz" in config:
+        return config["translation_coefficients_hz"]
+    return echo.metadata.get("translation_coefficients_hz")
+
+
 def estimate_rotation(echo, config):
-    compensated = compensate(
-        echo.iq, echo.elapsed_s, echo.metadata["translation_coefficients_hz"]
-    )
+    coefficients = translation_coefficients_hz(echo, config)
+    if coefficients is None:
+        compensated = np.asarray(echo.iq)
+    else:
+        compensated = compensate(echo.iq, echo.elapsed_s, coefficients)
     dynamic = stft(
         compensated,
         echo.metadata["sample_rate_hz"],
