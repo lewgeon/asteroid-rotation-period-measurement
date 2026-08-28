@@ -1,6 +1,6 @@
-[English](README_EN.md)
-
 # 小行星雷达自转周期反演模块
+
+[English](README_EN.md)
 
 本目录现在是总项目中的第三个子模块，只负责从上游 `echo/` 模块保存的
 `echo.npz` 估计自转周期。视线向量解算已迁移到 `../observation/`，回波仿真已

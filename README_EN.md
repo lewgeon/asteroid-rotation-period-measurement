@@ -1,6 +1,6 @@
-[中文](README.md)
-
 # Asteroid Radar Rotation-Period Inversion Module
+
+[中文](README.md)
 
 This directory is now the third submodule in the full project. It only estimates
 rotation-period candidates from the `echo.npz` file produced by `../echo/`.
