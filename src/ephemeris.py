@@ -79,11 +79,11 @@ class HorizonsStateProvider:
 
     def __init__(
         self,
-        id_type: str | None = "smallbody",
+        object_type: str | None = "smallbody",
         cache: bool = True,
         cache_directory: str | Path | None = None,
     ) -> None:
-        self.id_type = id_type
+        self.object_type = object_type
         self.cache = cache
         self.cache_directory = (
             Path(cache_directory).resolve() if cache_directory else None
@@ -98,7 +98,7 @@ class HorizonsStateProvider:
 
         query = Horizons(
             id=target,
-            id_type=self.id_type,
+            id_type=self.object_type,
             location="@0",
             epochs=float(epoch_tdb_jd),
         )

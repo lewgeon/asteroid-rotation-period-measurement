@@ -1,8 +1,11 @@
 """Coarse rotation-period inversion from a saved EchoDataset."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from scipy import signal
@@ -93,25 +96,35 @@ def translation_coefficients_hz(echo, config):
     return echo.metadata.get("translation_coefficients_hz")
 
 
-def estimate_rotation(echo, config):
+def estimate_rotation(echo, config, progress_callback: Callable[[str, int, str], None] | None = None):
+    if progress_callback:
+        progress_callback("inversion", 0, "准备反演输入")
     coefficients = translation_coefficients_hz(echo, config)
     if coefficients is None:
         compensated = np.asarray(echo.iq)
     else:
         compensated = compensate(echo.iq, echo.elapsed_s, coefficients)
+    if progress_callback:
+        progress_callback("inversion", 15, "计算动态频谱")
     dynamic = stft(
         compensated,
         echo.metadata["sample_rate_hz"],
         config["stft_window_samples"],
         config["stft_overlap_fraction"],
     )
+    if progress_callback:
+        progress_callback("inversion", 35, "提取频谱特征")
     features = spectral_features(dynamic)
     periods = {}
-    for name, values in {
+    feature_items = tuple({
         "total_power": features.total_power,
         "rms_bandwidth": features.rms_bandwidth_hz,
         "centroid": features.centroid_hz,
-    }.items():
+    }.items())
+    for index, (name, values) in enumerate(feature_items, start=1):
+        if progress_callback:
+            percent = 35 + int(round(55 * (index - 1) / len(feature_items)))
+            progress_callback("inversion", percent, f"周期网格搜索：{name}")
         estimate = lomb_scargle(
             features.times_s,
             values,
@@ -122,4 +135,6 @@ def estimate_rotation(echo, config):
         periods[name] = add_harmonics(
             estimate, config["period_min_s"], config["period_max_s"]
         )
+    if progress_callback:
+        progress_callback("inversion", 92, "整理周期候选结果")
     return InversionResult(compensated, dynamic, features, periods)
