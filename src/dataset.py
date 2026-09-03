@@ -1,6 +1,6 @@
 """Read echo datasets produced by the echo simulation module."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -22,6 +22,8 @@ class EchoDataset:
     scatter_elapsed_s: np.ndarray
     emit_elapsed_s: np.ndarray
     metadata: Dict[str, Any]
+    acquisition_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    fast_time_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
 
 
 def _metadata_from_npz(data) -> Dict[str, Any]:
@@ -77,6 +79,12 @@ def load_echo(path) -> EchoDataset:
             coherence_id=np.asarray(data["coherence_id"], dtype=int)
             if "coherence_id" in data
             else np.zeros(sample_count, dtype=int),
+            acquisition_id=np.asarray(data["acquisition_id"], dtype=int)
+            if "acquisition_id" in data
+            else np.zeros(sample_count, dtype=int),
+            fast_time_s=np.asarray(data["fast_time_s"], dtype=float)
+            if "fast_time_s" in data
+            else np.array([], dtype=float),
             tx_los_icrs=np.asarray(data["tx_los_icrs"], dtype=float)
             if "tx_los_icrs" in data
             else _default_vectors(sample_count),

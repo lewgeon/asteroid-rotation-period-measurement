@@ -1,5 +1,11 @@
 # Asteroid Radar Rotation-Period Inversion Module
 
+For chirp input laid out as `[pulse, fast_time]`, this module range-compresses
+each pulse independently and extracts total power, range centroid, and range
+width. The features retain the true pulse epochs and feed the Lomb–Scargle
+search directly; complex phase is never stitched across coherent acquisitions.
+One-dimensional CW input continues to use the existing STFT spectral path.
+
 [中文](README.md)
 
 This directory is now the third submodule in the full project. It only estimates
