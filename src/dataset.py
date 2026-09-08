@@ -24,6 +24,16 @@ class EchoDataset:
     metadata: Dict[str, Any]
     acquisition_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
     fast_time_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    run_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    track_id: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    row_start_sample: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    row_fast_time_offset_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    centroid_fractional_offset_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    rx_adc_start_elapsed_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    rx_adc_stop_elapsed_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
+    signal_echo_overlap: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
+    window_overlap: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
+    common_path_rate_m_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
 
 
 def _metadata_from_npz(data) -> Dict[str, Any]:
@@ -85,6 +95,27 @@ def load_echo(path) -> EchoDataset:
             fast_time_s=np.asarray(data["fast_time_s"], dtype=float)
             if "fast_time_s" in data
             else np.array([], dtype=float),
+            run_id=np.asarray(data["run_id"], dtype=int)
+            if "run_id" in data else np.asarray(data["acquisition_id"], dtype=int)
+            if "acquisition_id" in data else np.zeros(sample_count, dtype=int),
+            track_id=np.asarray(data["track_id"], dtype=int)
+            if "track_id" in data else np.zeros(sample_count, dtype=int),
+            row_start_sample=np.asarray(data["row_start_sample"], dtype=np.int64)
+            if "row_start_sample" in data else np.full(sample_count, -1, dtype=np.int64),
+            row_fast_time_offset_s=np.asarray(data["row_fast_time_offset_s"], dtype=float)
+            if "row_fast_time_offset_s" in data else np.full(sample_count, np.nan),
+            centroid_fractional_offset_s=np.asarray(data["centroid_fractional_offset_s"], dtype=float)
+            if "centroid_fractional_offset_s" in data else np.full(sample_count, np.nan),
+            rx_adc_start_elapsed_s=np.asarray(data["rx_adc_start_elapsed_s"], dtype=float)
+            if "rx_adc_start_elapsed_s" in data else np.full(sample_count, np.nan),
+            rx_adc_stop_elapsed_s=np.asarray(data["rx_adc_stop_elapsed_s"], dtype=float)
+            if "rx_adc_stop_elapsed_s" in data else np.full(sample_count, np.nan),
+            signal_echo_overlap=np.asarray(data["signal_echo_overlap"], dtype=bool)
+            if "signal_echo_overlap" in data else np.zeros(sample_count, dtype=bool),
+            window_overlap=np.asarray(data["window_overlap"], dtype=bool)
+            if "window_overlap" in data else np.zeros(sample_count, dtype=bool),
+            common_path_rate_m_s=np.asarray(data["common_path_rate_m_s"], dtype=float)
+            if "common_path_rate_m_s" in data else np.full(sample_count, np.nan),
             tx_los_icrs=np.asarray(data["tx_los_icrs"], dtype=float)
             if "tx_los_icrs" in data
             else _default_vectors(sample_count),
