@@ -293,7 +293,14 @@ def _compensate_raw_centroid_iq(iq, echo, valid_samples):
 
 
 def estimate_rotation(echo, config, progress_callback: Callable[[str, int, str], None] | None = None):
-    if echo.metadata.get("data_layout") in {"pulse_fast_time", "pulse_adc_windows"} or np.asarray(echo.iq).ndim == 2:
+    try:
+        from .dataset import echo_layout, normalize_inversion_policy
+    except ImportError:
+        from dataset import echo_layout, normalize_inversion_policy
+
+    layout = echo_layout(echo)
+    config = normalize_inversion_policy(config, layout)
+    if layout == "chirp":
         return _estimate_chirp_rotation(echo, config, progress_callback)
     if progress_callback:
         progress_callback("inversion", 0, "准备反演输入")
@@ -304,6 +311,8 @@ def estimate_rotation(echo, config, progress_callback: Callable[[str, int, str],
         compensated = compensate(echo.iq, echo.elapsed_s, coefficients)
     if progress_callback:
         progress_callback("inversion", 15, "计算动态频谱")
+    if "stft_window_samples" not in config or "stft_overlap_fraction" not in config:
+        raise ValueError("CW 反演需要 stft_window_samples 与 stft_overlap_fraction")
     dynamic = stft(
         compensated,
         echo.metadata["sample_rate_hz"],
@@ -351,12 +360,21 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         valid_samples = valid
     else:
         raise ValueError("chirp valid 必须是逐脉冲或与二维 IQ 同形状")
-    processing = str(config.get("motion_compensation", "centroid_geometry"))
     output_reference = str(echo.metadata.get("echo_output_reference", "raw_baseband"))
-    if processing not in {"centroid_geometry", "none"}:
-        raise ValueError(f"不支持的 motion_compensation：{processing}")
     if output_reference not in {"raw_baseband", "centroid_compensated"}:
         raise ValueError(f"不支持的 echo_output_reference：{output_reference}")
+    # Derive compensation from the echo artifact; config override is expert-only.
+    processing = str(config.get("motion_compensation", "auto")).lower()
+    already_compensated = output_reference == "centroid_compensated" or bool(
+        echo.metadata.get("centroid_common_terms_removed", False)
+    )
+    if processing == "auto":
+        processing = "none" if already_compensated else "centroid_geometry"
+    elif processing == "centroid_geometry" and already_compensated:
+        # Legacy configs often restated compensation even when echo already removed common terms.
+        processing = "none"
+    if processing not in {"centroid_geometry", "none"}:
+        raise ValueError(f"不支持的 motion_compensation：{processing}")
     compensated_iq = np.where(valid_samples, raw, 0.0)
     if processing == "centroid_geometry" and output_reference == "raw_baseband":
         compensated_iq = _compensate_raw_centroid_iq(
@@ -381,6 +399,15 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         compressed, delay_axes, valid=valid_samples
     )
     requested_time_role = str(config.get("period_time_role", "scatter_centroid"))
+    # Accept GUI legacy aliases.
+    if requested_time_role in {"receive", "receive_elapsed_s"}:
+        requested_time_role = "receive_centroid"
+    if requested_time_role in {"scatter_elapsed_s"}:
+        requested_time_role = "scatter_centroid"
+    if requested_time_role == "emit":
+        raise ValueError(
+            "period_time_role=emit 尚未作为周期搜索时间轴实现；请使用 scatter_centroid 或 receive_centroid"
+        )
     if requested_time_role == "scatter_centroid":
         processing_times = np.asarray(
             getattr(echo, "scatter_elapsed_s", echo.elapsed_s), dtype=float
@@ -388,10 +415,10 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         if processing_times.shape != (len(compressed),) or not np.all(
             np.isfinite(processing_times)
         ):
-            processing_times = np.asarray(echo.elapsed_s, dtype=float)
-            time_axis_role = "receive_elapsed_s_fallback"
-        else:
-            time_axis_role = "scatter_elapsed_s"
+            raise ValueError(
+                "请求 scatter_centroid 时间轴，但 echo 缺少有效的 scatter_elapsed_s"
+            )
+        time_axis_role = "scatter_elapsed_s"
     elif requested_time_role == "receive_centroid":
         processing_times = np.asarray(echo.elapsed_s, dtype=float)
         time_axis_role = "receive_elapsed_s"
@@ -402,8 +429,22 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
     profiles = RangeProfiles(processing_times, common_delay, aligned)
     if progress_callback:
         progress_callback("inversion", 20, "形成滑动 CPI 距离—多普勒数据")
-    cpi_pulses = int(config.get("cpi_pulses", 128))
-    cpi_hop = int(config.get("cpi_hop_pulses", max(1, cpi_pulses // 4)))
+    prf_hz = float(echo.metadata.get("prf_hz", 0.0) or 0.0)
+
+    def duration_to_pulses(key, minimum):
+        duration = float(config[key])
+        if not np.isfinite(duration) or duration <= 0.0:
+            raise ValueError(f"{key} 必须是正的有限秒数")
+        if prf_hz <= 0.0:
+            raise ValueError(f"{key} 需要 echo 元数据中的正 prf_hz")
+        return max(minimum, int(np.ceil(duration * prf_hz)))
+
+    cpi_pulses = duration_to_pulses("cpi_duration_s", 2)
+    default_hop_duration = float(config["cpi_duration_s"]) / 4.0
+    if config.get("cpi_hop_duration_s") is not None:
+        cpi_hop = duration_to_pulses("cpi_hop_duration_s", 1)
+    else:
+        cpi_hop = max(1, int(np.ceil(default_hop_duration * prf_hz)))
     run_id = np.asarray(getattr(echo, "run_id", np.array([])), dtype=int)
     if run_id.shape != (len(compressed),):
         run_id = np.zeros(len(compressed), dtype=int)
@@ -430,9 +471,11 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         feature_times = features.times_s
         groups = features.coherence_id
         weights = np.maximum(features.effective_sample_count, np.finfo(float).eps)
-    except ValueError:
-        # Very short smoke-test runs cannot form a CPI.  Retain a documented
-        # per-pulse fallback instead of crossing a coherence boundary.
+    except ValueError as exc:
+        # Only this exact data-shortage condition may use the documented
+        # per-pulse fallback.  Configuration and shape errors must propagate.
+        if str(exc) != "没有任何相干分组包含足够脉冲形成一个 CPI":
+            raise
         dynamic = profiles
         features = range_features(
             processing_times,

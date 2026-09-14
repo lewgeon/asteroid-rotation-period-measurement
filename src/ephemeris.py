@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 from astropy import units as u
@@ -18,13 +17,6 @@ from .pointing import CartesianState
 
 iers.conf.auto_download = False
 iers.conf.auto_max_age = None
-
-
-class TargetStateProvider(Protocol):
-    """Interface supplying geometric barycentric target states."""
-
-    def state(self, target: str, epoch: Time) -> CartesianState:
-        ...
 
 
 @dataclass(frozen=True)
