@@ -1,0 +1,6 @@
+# 发布归档（git archive / GitHub source zip / sdist）不包含测试。
+# 测试是开发期的不变量，留在仓库里给 CI 跑，但用户读源码时不需要它们。
+# 注意：.gitattributes 里命名目录的模式不会递归生效，必须写成 tests/**。
+tests/** export-ignore
+scripts/make_ellipsoid.py export-ignore
+scripts/solve_pointing.py export-ignore

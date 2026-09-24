@@ -49,6 +49,24 @@ def _default_vectors(length: int) -> np.ndarray:
     return np.zeros((length, 3), dtype=float)
 
 
+# 由脉冲/快时间行轴派生的字段。chirp 必须齐备；CW 不携带，缺键时走
+# load_echo 的兜底值（见 _validate_echo_dataset）。
+_ROW_AXIS_FIELDS = (
+    "coherence_id",
+    "acquisition_id",
+    "run_id",
+    "track_id",
+    "row_start_sample",
+    "row_fast_time_offset_s",
+    "centroid_fractional_offset_s",
+    "rx_adc_start_elapsed_s",
+    "rx_adc_stop_elapsed_s",
+    "signal_echo_overlap",
+    "window_overlap",
+    "common_path_rate_m_s",
+)
+
+
 def _infer_sample_rate_hz(elapsed_s: np.ndarray):
     if len(elapsed_s) < 2:
         return None
@@ -133,12 +151,50 @@ def _validate_echo_axes(elapsed_s, iq, fast_time_s, metadata) -> None:
         raise ValueError("chirp 回波 elapsed_s 长度必须等于脉冲数（iq 第 0 维）")
     if layout and layout not in {"pulse_fast_time", "pulse_adc_windows"}:
         raise ValueError(f"二维 IQ 的 data_layout 无效：{layout!r}")
+    if fast_time_s.ndim != 1:
+        raise ValueError("fast_time_s 必须是一维数组")
     if len(fast_time_s) != iq.shape[1]:
         raise ValueError("fast_time_s 长度必须等于 iq 第 1 维")
+    fast_sample_count = metadata.get("fast_sample_count")
+    if fast_sample_count is not None:
+        if isinstance(fast_sample_count, (bool, np.bool_)):
+            raise ValueError("metadata.fast_sample_count 必须是正整数")
+        try:
+            numeric_count = float(fast_sample_count)
+        except (TypeError, ValueError):
+            raise ValueError("metadata.fast_sample_count 必须是正整数") from None
+        if (
+            not np.isfinite(numeric_count)
+            or not numeric_count.is_integer()
+            or numeric_count <= 0
+        ):
+            raise ValueError("metadata.fast_sample_count 必须是正整数")
+        if int(numeric_count) != iq.shape[1]:
+            raise ValueError(
+                "metadata.fast_sample_count 必须等于 iq 第 1 维；"
+                f"收到 {fast_sample_count} 与 {iq.shape[1]}"
+            )
 
 
-def _validate_echo_dataset(echo: EchoDataset) -> None:
-    """Validate all arrays that share the echo row axis."""
+def _validate_echo_dataset(echo: EchoDataset, present: set[str]) -> None:
+    """Validate the arrays each layout actually carries.
+
+    The file format has a fixed key set, but the two layouts do not carry the
+    same information:
+
+    * chirp (``iq`` 2-D) owns a pulse/fast-time **row axis**, so every field
+      derived from that axis must be present in the file and have one value
+      per pulse.  ``present`` is used to tell a genuinely written field from a
+      missing-key default, because the defaults are length-matched and would
+      otherwise hide a gap.
+    * CW (``iq`` 1-D) has one continuous receive axis and no row axis at all,
+      so the row-axis fields are not information it holds.  They may be absent
+      (``load_echo`` fills the defaults) and are only length-checked when the
+      file does provide them.
+
+    Requiring the same field set from both layouts is what previously forced
+    the echo writer to emit length-matched placeholders for CW.
+    """
 
     iq = np.asarray(echo.iq)
     sample_count = iq.shape[0]
@@ -147,29 +203,32 @@ def _validate_echo_dataset(echo: EchoDataset) -> None:
     valid_shape = np.asarray(echo.valid).shape
     if valid_shape not in {(sample_count,), iq.shape}:
         raise ValueError("valid 必须是逐行掩码或与 iq 同形状")
-    for name in (
-        "coherence_id",
-        "acquisition_id",
-        "run_id",
-        "track_id",
-        "row_start_sample",
-        "row_fast_time_offset_s",
-        "centroid_fractional_offset_s",
-        "rx_adc_start_elapsed_s",
-        "rx_adc_stop_elapsed_s",
-        "signal_echo_overlap",
-        "window_overlap",
-        "common_path_rate_m_s",
-        "tx_range_m",
-        "rx_range_m",
-        "scatter_elapsed_s",
-        "emit_elapsed_s",
-    ):
+    if iq.ndim == 2:
+        if valid_shape != iq.shape:
+            raise ValueError("chirp 回波的 valid 必须与 iq 同形状")
+
+    # 两种布局都带的逐样本物理量。
+    for name in ("tx_range_m", "rx_range_m", "scatter_elapsed_s", "emit_elapsed_s"):
         if np.asarray(getattr(echo, name)).shape != (sample_count,):
             raise ValueError(f"{name} 长度必须等于 iq 第 0 维")
     for name in ("tx_los_icrs", "rx_los_icrs"):
         if np.asarray(getattr(echo, name)).shape != (sample_count, 3):
             raise ValueError(f"{name} 形状必须是 (样本数, 3)")
+
+    if iq.ndim == 1:
+        # 行轴字段不是 CW 携带的信息；仅当文件真的提供了它们才校验长度。
+        for name in _ROW_AXIS_FIELDS:
+            value = np.asarray(getattr(echo, name))
+            if name in present and value.shape != (sample_count,):
+                raise ValueError(f"{name} 长度必须等于 iq 第 0 维")
+        return
+
+    # chirp：行轴字段是真实信息，必须齐备且与脉冲数一致。
+    for name in _ROW_AXIS_FIELDS:
+        if name not in present:
+            raise ValueError(f"chirp 回波缺少行轴字段：{name}")
+        if np.asarray(getattr(echo, name)).shape != (sample_count,):
+            raise ValueError(f"{name} 长度必须等于 iq 第 0 维")
 
 
 def load_echo(path) -> EchoDataset:
@@ -268,5 +327,5 @@ def load_echo(path) -> EchoDataset:
             else elapsed_s,
             metadata=metadata,
         )
-        _validate_echo_dataset(echo)
+        _validate_echo_dataset(echo, set(data.files))
         return echo

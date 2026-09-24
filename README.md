@@ -105,7 +105,7 @@ python scripts\estimate_period.py `
 
 ```powershell
 conda activate pytorch
-python pipeline.py --config configs\campaign_v4_example.json
+python pipeline.py --config configs\chirp_point_target_test.json
 ```
 
 顶层流水线会先运行 `observation/solve_observation_info.py`，再运行
