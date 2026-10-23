@@ -1,11 +1,14 @@
 # 小行星雷达自转周期反演模块
 
-chirp 数据采用 `[pulse, fast_time]` 输入时，本模块先沿快时间逐脉冲匹配滤波，
-再提取总功率、距离质心和距离展宽。上述特征保留每个脉冲的真实历元，并直接用于
-Lomb–Scargle 不均匀采样周期搜索；不同相干采集之间不拼接复相位。CW 一维输入仍沿用
-原有 STFT—频谱特征流程。
+chirp 数据采用 `[pulse, fast_time]` 输入，沿快时间逐脉冲匹配滤波。CPI 不足时，完整原生相关输出产生总功率、距离质心和中央 90% 能量宽度；CPI 可用时还提取多普勒特征。两条周期搜索路径均使用共同截距，保留原始特征时刻，不按 Run 聚合。Run 与相干组标签限制 CPI 构造，不再成为回归自由截距；不同相干采集不拼接复相位。此模型假定跨 Run 标量参考和标定一致，未知 Run 偏置需独立校准。实际处理路径、有效／排除样本数和特征跳过原因写入搜索诊断。未校准显著性显示“未评估”；CW 一维输入沿用 STFT—频谱特征流程。
 
 [English](README_EN.md)
+
+CPI的总功率、距离质心及90%能量宽度均用完整相关支撑，FFT多普勒谱仍保留Hann窗影响；窗RMS和Nyquist接缝仅作诊断，不自动校正宽度或删通道。标量缓存v4使旧特征重算，兼容的旧CPI显示谱可复用。融合报告输出为`period_selection.json/html`，另保留`period_uncertainty.json/html`条件误差诊断。
+
+Chirp默认采用`period_selection="predictive_joint"`：在完整周期网格的同一候选周期上拟合各可用通道，以整Run五折留出预测改善的通道中位数选择周期；有效Run少于10个时明确退回共同拟合评分。独立单特征结果仍保留，`legacy_consensus`保留旧投票规则供对照。预测分数不是概率，相关通道的共同偏差与跨场景精度仍待校准。算法、去重边界及180组配对控制见[共同周期专题](https://github.com/lewgeon/radar-asteroid-rotation-period-pipeline/blob/chirp-pulse/docs/4.3/vs_4.2/changes/PERIOD_INVERSION_BASELINE.md#predictive-joint-20261016)。100Run／500CPI实际CLI在H1、无视线相位补偿、1800—14400秒搜索下得到5399.833177秒，相对5400秒重复周期偏差−0.166823秒；这只是一份输入的结果，不是稳定亚秒保证。
+
+Chirp反演可显式配置`compute_device: "cpu"`（默认）或`"cuda:0"`，CUDA加速匹配滤波、Fourier距离对齐、慢时间FFT及周期网格搜索（含整Run重采样）；特征归约、局部细化和病态网格仍用CPU，无CUDA时明确记录回退。`uncertainty_method: "run_bootstrap"`可启用至少10个有效Run的整Run重采样诊断，默认200次，可由`uncertainty_replicates`和`uncertainty_seed`控制；默认`"none"`不增加重采样。结果保存为`period_uncertainty.json/html`，局部区间及经验分位尚未校准为最终3σ保证。操作见[GUI手册](../docs/4.3/GUI_USER_MANUAL.md#compute-and-uncertainty)。
 
 本目录现在是总项目中的第三个子模块，只负责从上游 `echo/` 模块保存的
 `echo.npz` 估计自转周期。视线向量解算已迁移到 `../observation/`，回波仿真已

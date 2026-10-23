@@ -20,12 +20,21 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from dataset import load_echo
+from processing_store import attach_store
 from inversion import estimate_rotation
+from radar_signal import sampling_window_amplitude
+from method_report import write_method_comparison
+from result_views import file_identity, publish_saved_features, save_processing_view,write_html_atomic
+from inspection_store import write_inspections
+from compute_backend import resolve_device
+from period_uncertainty import write_uncertainty_report
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--echo", default="outputs/echo/echo.npz")
 parser.add_argument("--config", default="configs/inversion.json")
+parser.add_argument('--export-full-cpi-power',action='store_true',
+    help='显式保存各CPI双精度科学功率矩阵（默认仅保存完整网格显示产物，磁盘占用更小）')
 parser.add_argument(
     "--output",
     default=None,
@@ -73,13 +82,34 @@ def report_summary(title: str, items) -> None:
 
 
 report_progress("inversion", 0, "读取回波数据")
-echo = load_echo(args.echo)
+loaded_echo_identity = file_identity(args.echo)
+echo = attach_store(load_echo(args.echo,mapped_directory=Path(args.echo).parent/'processing_cache'/'mapped',load_clean=False),args.echo)
+if file_identity(args.echo) != loaded_echo_identity:
+    raise ValueError('读取回波期间文件发生变化，请重新运行')
 config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+if args.export_full_cpi_power:config['export_full_cpi_power']=True
 output = args.output or config.get("output_path")
 config.pop("output_path", None)
 if not output:
     raise SystemExit("必须通过 --output 或 config.output_path 指定输出目录")
+output=Path(output);output.mkdir(parents=True,exist_ok=True)
+(output/'inversion_in_progress.json').write_text(json.dumps(dict(config=config,echo_identity=loaded_echo_identity)),encoding='utf-8')
+execution=resolve_device(config)
+report_summary('计算设备',[('请求',execution['requested']),('实际',execution['actual']),('加速范围','Chirp脉压／距离对齐／慢时间FFT／周期网格搜索；局部细化及病态网格CPU')])
+if execution['reason']:
+    print('__WARNING__ '+json.dumps(dict(stage='inversion',message=execution['reason'],dialog=False)),flush=True)
 result = estimate_rotation(echo, config, progress_callback=report_progress)
+if file_identity(args.echo)!=loaded_echo_identity:
+    raise ValueError('反演计算期间回波改变，禁止将旧内存结果认证为新来源')
+for notice in getattr(result, "notices", ()):
+    print(
+        "__WARNING__ "
+        + json.dumps(
+            {"stage": "inversion", "message": notice, "dialog": True},
+            ensure_ascii=True,
+        ),
+        flush=True,
+    )
 output = Path(output)
 output.mkdir(parents=True, exist_ok=True)
 
@@ -89,8 +119,9 @@ def _save_period_observables(path):
     feature_names = []
     columns = []
     for name in (
-        "total_power", "doppler_centroid_hz", "rms_bandwidth_hz",
-        "range_centroid_s", "rms_range_width_s", "centroid_delay_s", "rms_width_s",
+        "total_power", "doppler_centroid_hz", "centroid_hz", "rms_bandwidth_hz",
+        "range_centroid_s", "centroid_delay_s",
+        "energy_width_90_s", "energy_range_width_90_s",
     ):
         if hasattr(features, name):
             feature_names.append(name)
@@ -125,10 +156,14 @@ def _save_period_observables(path):
     uncertainty = np.empty_like(values)
     for column in range(values.shape[1]):
         differences = np.diff(values[:, column])
+        differences = differences[np.isfinite(differences)]
         scale = 1.4826 * np.median(np.abs(differences - np.median(differences))) / np.sqrt(2.0) if len(differences) else 0.0
         uncertainty[:, column] = max(float(scale), np.finfo(float).eps)
     np.savez_compressed(
         path,
+        **{name: np.asarray(getattr(features, name), dtype=float) for name in (
+            'doppler_window_rms_hz', 'doppler_nyquist_edge_fraction',
+            'doppler_nyquist_edge_half_width_hz') if getattr(features, name, None) is not None},
         reference_time_utc=np.array(echo.metadata.get("reference_time_utc", "")),
         time_elapsed_s=times,
         value=values,
@@ -141,6 +176,20 @@ def _save_period_observables(path):
         metadata_json=np.array(json.dumps({
             "time_role": "feature_center",
             "time_axis_role": result.time_axis_role,
+            'inversion_config': config,
+            'echo_identity': loaded_echo_identity,
+            "search_diagnostics": result.search_diagnostics,
+            "feature_algorithm_version": 4,
+            "cpi_range_statistics_support": "full_correlation" if hasattr(features, 'energy_range_width_90_s') else None,
+            **({
+                "energy_width_definition": "central_90_percent_full_correlation_power",
+                "energy_width_quantiles": [0.05, 0.95],
+                "energy_width_quantile_rule": "first_sample_cumulative_power_at_least_fraction",
+                "energy_width_gate": "none",
+                "energy_width_zero_power": "NaN",
+                "energy_width_processing": ("native_full_correlation" if hasattr(features, "energy_width_90_s")
+                                            else "full_correlation_aligned_cpi_windowed_power"),
+            } if hasattr(features, "energy_width_90_s") or hasattr(features, "energy_range_width_90_s") else {}),
             "quality_flag_bits": {
                 "1": "physical_echo_overlap",
                 "2": "saved_window_overlap",
@@ -150,6 +199,9 @@ def _save_period_observables(path):
 
 
 _save_period_observables(output / "period_observables.npz")
+if go is not None:
+    publish_saved_features(output / 'period_observables.npz', config, output / 'features.html', args.echo)
+    save_processing_view(result, output)
 
 truth = echo.metadata.get("truth_period_s")
 period_min = config["period_min_s"]
@@ -175,7 +227,10 @@ summary = {
             else None
         ),
         "significant": estimate.significant,
+        "significance_status": ("not_evaluated" if not np.isfinite(estimate.false_alarm_probability)
+                                else "significant" if estimate.significant else "not_significant"),
         "significance_calibration": estimate.significance_calibration,
+        "search_diagnostics": estimate.search_diagnostics,
         **_alias_fields(estimate.best_period_s),
         "candidates": [
             {
@@ -190,69 +245,21 @@ summary = {
 }
 
 
-def _cross_feature_consensus(feature_summary, relative_tolerance=0.05):
-    """Select a period supported by distinct observables, not one tallest peak.
-
-    Multi-harmonic fits naturally admit integer-multiple fundamentals.  Clusters
-    are therefore ranked first by independent feature support and then by their
-    relative spread.  Half/double aliases appended for reporting are excluded
-    from the vote so they cannot count twice for the same measured peak.
-    """
-
-    entries = []
-    for feature, item in feature_summary.items():
-        for rank, candidate in enumerate(item["candidates"][:5]):
-            if candidate["source"].endswith((":half", ":double")):
-                continue
-            entries.append(
-                {
-                    "feature": feature,
-                    "period_s": float(candidate["period_s"]),
-                    "score": float(candidate["score"]),
-                    "rank": rank,
-                }
-            )
-    clusters = []
-    for entry in sorted(entries, key=lambda item: item["period_s"]):
-        compatible = [
-            cluster for cluster in clusters
-            if abs(entry["period_s"] / cluster["center_s"] - 1.0) <= relative_tolerance
-        ]
-        if compatible:
-            cluster = min(
-                compatible,
-                key=lambda item: abs(np.log(entry["period_s"] / item["center_s"])),
-            )
-            cluster["entries"].append(entry)
-            cluster["center_s"] = float(np.median([x["period_s"] for x in cluster["entries"]]))
-        else:
-            clusters.append({"center_s": entry["period_s"], "entries": [entry]})
-    ranked = []
-    for cluster in clusters:
-        by_feature = {}
-        for entry in cluster["entries"]:
-            current = by_feature.get(entry["feature"])
-            if current is None or entry["rank"] < current["rank"]:
-                by_feature[entry["feature"]] = entry
-        evidence = list(by_feature.values())
-        center = float(np.median([item["period_s"] for item in evidence]))
-        spread = float(
-            np.median([abs(item["period_s"] / center - 1.0) for item in evidence])
-        )
-        ranked.append((len(evidence), spread, center, evidence))
-    if not ranked:
-        raise ValueError("没有可用于跨特征共识的周期候选")
-    support, spread, period_s, evidence = sorted(
-        ranked, key=lambda item: (-item[0], item[1], item[2])
-    )[0]
-    return period_s, support, spread, evidence
+from period_consensus import _cross_feature_consensus, CONSENSUS_POLICY
 
 
-consensus_period, consensus_support, consensus_spread, consensus_evidence = (
-    _cross_feature_consensus(summary)
-)
+selection_report = result.selection_report
+if selection_report:
+    consensus_period = selection_report['period_s']
+    consensus_support = selection_report['support']
+    consensus_spread = selection_report['relative_spread']
+    consensus_evidence = selection_report['evidence']
+    selection_policy = selection_report['policy']
+else:
+    consensus_period, consensus_support, consensus_spread, consensus_evidence = _cross_feature_consensus(summary)
+    selection_policy = CONSENSUS_POLICY
 contributing = [summary[item["feature"]] for item in consensus_evidence]
-calibrated_faps = [
+calibrated_faps = [] if selection_report else [
     item["false_alarm_probability"] for item in contributing
     if item["false_alarm_probability"] is not None
 ]
@@ -262,18 +269,30 @@ consensus_significant = consensus_support >= 2 and sum(
 ) >= 2
 aliases = _alias_fields(consensus_period)
 best_summary = {
-    "recommended_feature": "cross_feature_consensus",
+    "period_uncertainty_status":result.uncertainty_report.get('status','not_evaluated'),
+    "final_3sigma_interval_s":result.uncertainty_report.get('final_3sigma_interval_s'),
+    "recommended_feature": "predictive_joint" if selection_report else "cross_feature_consensus",
     "best_period_s": consensus_period,
     "best_period_h": consensus_period / 3600,
     "relative_error": abs(consensus_period - truth) / truth if truth else None,
     "false_alarm_probability": consensus_fap,
     "significant": consensus_significant,
+    "significance_status": ("not_evaluated" if not calibrated_faps
+                            else "significant" if consensus_significant else "not_significant"),
     "significance_calibration": (
         "conservative_cross_feature"
         if calibrated_faps else "unavailable_multi_harmonic_regression"
     ),
     "time_axis_role": result.time_axis_role,
+    "search_diagnostics": result.search_diagnostics,
     "consensus_feature_support": consensus_support,
+    "consensus_policy": selection_policy,
+    "period_selection_status": selection_report.get('status', 'legacy_consensus'),
+    "period_selection": selection_report,
+    "period_interpretation": "observed_modulation_period",
+    "rotation_period_identifiability": "symmetry_and_harmonic_ambiguity_not_resolved",
+    "relative_error_to_half_truth": abs(consensus_period-truth/2)/(truth/2) if truth else None,
+    "truth_comparison_scope": "simulation_diagnostic_only_full_and_half_truth_not_used_in_selection",
     "consensus_relative_spread": consensus_spread,
     "consensus_evidence": consensus_evidence,
     "half_period_s": aliases["half_period_s"],
@@ -288,14 +307,17 @@ best_summary = {
 (output / "best_summary.json").write_text(
     json.dumps(best_summary, ensure_ascii=False, indent=2), encoding="utf-8"
 )
+if selection_report:
+    from selection_report import write_selection_report
+    write_selection_report(output, selection_report)
+write_uncertainty_report(output,result.uncertainty_report or dict(enabled=False,status='not_evaluated'))
+write_method_comparison(output, result.method_comparisons)
 
 # Sampling-window diagnostic. Peaks here identify aliases caused by campaign
 # gaps independently of the measured feature values.
 feature_times = np.asarray(result.features.times_s, dtype=float)
 window_frequency_hz = np.linspace(1 / period_max, 1 / period_min, config["period_grid_size"])
-window_amplitude = np.abs(
-    np.exp(-2j * np.pi * feature_times[:, None] * window_frequency_hz[None, :]).sum(axis=0)
-) / max(1, len(feature_times))
+window_amplitude = sampling_window_amplitude(feature_times, window_frequency_hz)
 np.savez_compressed(
     output / "window_function.npz",
     frequency_hz=window_frequency_hz,
@@ -344,6 +366,7 @@ if best_summary["double_period_s"] is not None:
         flush=True,
     )
 
+inspection_folder=write_inspections(echo,args.echo,config,report_progress) if go is not None else None
 report_progress("inversion", 95, "绘制动态频谱")
 power = result.dynamic_spectrum.power
 if power.ndim == 3:
@@ -358,6 +381,9 @@ if hasattr(result.dynamic_spectrum, "delays_s"):
         power_db.T, shading="auto", cmap="magma", vmin=-45, vmax=0,
     )
     ax.set(xlabel="Elapsed time (h)", ylabel="Relative bistatic path (m)")
+    preview_info = result.search_diagnostics.get("dynamic_preview")
+    if preview_info and preview_info["sampled"]:
+        ax.set_title("Sampled diagnostic range-time image (all pulses used in period search)")
 else:
     image = ax.pcolormesh(
         result.dynamic_spectrum.times_s / 3600,
@@ -381,7 +407,7 @@ for name, estimate in result.periods.items():
     )
 if truth:
     ax.axvline(truth / 3600, color="black", linestyle="--", label="truth")
-ax.set(xlabel="Candidate period (h)", ylabel="Lomb-Scargle score")
+ax.set(xlabel="Candidate period (h)", ylabel="Period-model score")
 ax.legend()
 fig.tight_layout()
 fig.savefig(output / "periodogram.png", dpi=240)
@@ -401,15 +427,32 @@ if go is not None:
         )
     if truth:
         plot.add_vline(x=truth, line_dash="dash", line_color="black", annotation_text="truth")
+    for name, estimate in result.periods.items():
+        peaks = [item for item in estimate.candidates[:5] if not item.source.endswith((':half', ':double'))]
+        plot.add_trace(go.Scatter(x=[item.period_s for item in peaks], y=[item.score for item in peaks],
+            mode='markers', name=name + ' 候选峰', marker=dict(size=9, symbol='diamond'),
+            hovertemplate='候选周期 %{x:.8g} s<br>分数 %{y:.6g}<extra>%{fullData.name}</extra>'))
+    plot.add_vline(x=best_summary['best_period_s'], line_color='red',
+                   annotation_text='最终共识选择')
     plot.update_layout(
-        title="Rotation-period search",
+        title="周期搜索：曲线、候选峰与最终共识选择",
         xaxis_title="Candidate period (s)",
-        yaxis_title="Lomb-Scargle score",
+        yaxis_title="周期模型分数",
         margin={"l": 60, "r": 25, "t": 55, "b": 50},
         height=620,
     )
-    plot.write_html(output / "periodogram.html", include_plotlyjs=True)
+    write_html_atomic(plot,output/'periodogram.html')
 
+completion=dict(observables=file_identity(output/'period_observables.npz'),
+    selection_report_identity=file_identity(output/'period_selection.json') if selection_report else None,
+    selection_html_identity=file_identity(output/'period_selection.html') if selection_report else None,
+    echo_identity=loaded_echo_identity,config=config,
+    inspection_folder=str(inspection_folder) if inspection_folder is not None else None)
+if file_identity(args.echo)!=loaded_echo_identity:raise ValueError('结果导出期间回波改变，不能认证完成')
+pending=output/'inversion_complete.pending.json'
+pending.write_text(json.dumps(completion,ensure_ascii=False),encoding='utf-8')
+pending.replace(output/'inversion_complete.json')
+(output/'inversion_in_progress.json').unlink(missing_ok=True)
 report_progress("inversion", 100, "周期反演完成")
 report_summary(
     "周期反演结果",
@@ -422,15 +465,22 @@ report_summary(
         ),
         ("真值周期", _fmt(truth, "s")),
         (
-            "相对误差",
+            "对完整自转真值的误差",
             "—" if best_summary["relative_error"] is None else f"{best_summary['relative_error'] * 100:.2f}%",
         ),
-        ("显著性", "显著" if best_summary["significant"] else "不显著"),
+        ("对半周期真值的误差（仅仿真诊断）", "—" if best_summary['relative_error_to_half_truth'] is None
+         else f"{best_summary['relative_error_to_half_truth'] * 100:.5f}%"),
+        ("周期含义", "观测调制周期；形体对称及谐波歧义仍需判定"),
+        ("周期融合", ("整Run留出预测" if selection_report.get('diagnostics', {}).get('validation_mode') == 'whole_run_cross_validation'
+                     else "共同拟合（Run不足，未留出验证）") if selection_report else "旧版候选投票"),
+        ("显著性", {"not_evaluated": "未评估", "significant": "显著",
+                    "not_significant": "不显著"}[best_summary["significance_status"]]),
         ("假警报概率", _fmt(best_summary["false_alarm_probability"], digits=4)),
         ("显著性校准", best_summary["significance_calibration"]),
-        ("共识特征支撑", f"{best_summary['consensus_feature_support']} 个"),
+        ("正预测增益通道" if selection_report else "共识特征支撑", f"{best_summary['consensus_feature_support']} 个"),
         ("共识相对离散度", _fmt(best_summary["consensus_relative_spread"], digits=4)),
         ("周期时间轴", best_summary["time_axis_role"]),
+        ("误差评估",{'not_evaluated':'未启用','unavailable':'观测不足或不可识别','experimental_coverage_unvalidated':'已完成条件性评估，覆盖率未校准'}.get(best_summary['period_uncertainty_status'],'未启用')),
         ("半周期别称", _fmt(best_summary["half_period_s"], "s", digits=8)),
         ("二倍周期别称", _fmt(best_summary["double_period_s"], "s", digits=8)),
     ],

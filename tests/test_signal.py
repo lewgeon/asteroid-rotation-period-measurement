@@ -9,7 +9,36 @@ from inversion.src.radar_signal import (
     matched_filter_chirp,
     matched_filter_group_delay_s,
     range_doppler_cube,
+    sampling_window_amplitude,
 )
+
+
+class SamplingWindowMemoryTests(unittest.TestCase):
+    def test_bounded_window_matches_independent_scalar_sum(self):
+        times = np.r_[np.arange(17) * .1, 10 + np.arange(19) * .12]
+        frequencies = np.linspace(.03, 2.7, 29)
+        expected = np.array([abs(sum(np.exp(-2j * np.pi * times * f))) / len(times)
+                             for f in frequencies])
+        self.assertGreater(np.ptp(expected), .1)
+        for budget in (16, 16 * 5, 16 * len(times), 16 * len(times) * 7, 2**20):
+            np.testing.assert_allclose(sampling_window_amplitude(times, frequencies, budget),
+                                       expected, rtol=0, atol=2e-15)
+        np.testing.assert_array_equal(sampling_window_amplitude([], frequencies), np.zeros(29))
+        with self.assertRaises(ValueError):
+            sampling_window_amplitude(times, frequencies, 15)
+
+    def test_window_exponential_is_bounded(self):
+        from unittest.mock import patch
+        from inversion.src import radar_signal
+        original = np.exp
+        sizes = []
+        def spy(values, **kwargs):
+            sizes.append(values.size)
+            return original(values, **kwargs)
+        with patch.object(radar_signal.np, 'exp', side_effect=spy):
+            sampling_window_amplitude(np.arange(301) * .01, np.linspace(.1, 2, 101), 16 * 37)
+        self.assertGreater(len(sizes), 1)
+        self.assertLessEqual(max(sizes), 37)
 
 
 class LeadingEdgeCompressionTests(unittest.TestCase):

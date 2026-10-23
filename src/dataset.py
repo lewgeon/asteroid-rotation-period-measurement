@@ -35,6 +35,24 @@ class EchoDataset:
     window_overlap: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
     common_path_rate_m_s: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
 
+    def close(self):
+        """Release source mappings before replacing an NPZ (notably on Windows).
+
+        Arrays/views of this dataset must not be used after close.
+        """
+        from dataclasses import fields
+        handles={};mapped=[]
+        for item in fields(self):
+            value=getattr(self,item.name);seen=set()
+            while isinstance(value,np.ndarray) and id(value) not in seen:
+                seen.add(id(value))
+                if isinstance(value,np.memmap):
+                    handles[id(value._mmap)]=value._mmap;mapped.append(item.name);break
+                value=getattr(value,'base',None)
+        for name in mapped:
+            value=getattr(self,name);setattr(self,name,np.array([],dtype=value.dtype))
+        for handle in handles.values():handle.close()
+
 
 def _metadata_from_npz(data) -> Dict[str, Any]:
     if "metadata_json" not in data:
@@ -109,11 +127,17 @@ def normalize_inversion_policy(config: Dict[str, Any], layout: str) -> Dict[str,
         "translation_coefficients_hz",
     }
     chirp_only = {
+        "los_phase_compensation", "spin_axis_ra_deg", "spin_axis_dec_deg",
+        "phase_period_convention", "multi_harmonic_enabled", "refine_period",
+        "compare_methods",
         "harmonics",
         "period_time_role",
         "motion_compensation",
         "cpi_duration_s",
         "cpi_hop_duration_s",
+        "doppler_estimator",
+        "period_selection",
+        "compute_device", "uncertainty_method", "uncertainty_replicates", "uncertainty_seed", "export_full_cpi_power",
     }
     allowed = set(shared)
     if layout == "cw":
@@ -131,6 +155,37 @@ def normalize_inversion_policy(config: Dict[str, Any], layout: str) -> Dict[str,
             "当前回波布局不接受 inversion 字段："
             + ", ".join(f"inversion.{key}" for key in unknown)
         )
+    if layout == "chirp":
+        if config.get('period_selection', 'predictive_joint') not in ('predictive_joint', 'legacy_consensus'):
+            raise ValueError('period_selection必须为predictive_joint或legacy_consensus')
+        if config.get('compute_device','cpu') not in ('cpu','cuda:0'):
+            raise ValueError('compute_device必须为cpu或cuda:0')
+        if config.get('uncertainty_method','none') not in ('none','run_bootstrap'):
+            raise ValueError('uncertainty_method必须为none或run_bootstrap')
+        for name,default,minimum in (('uncertainty_replicates',200,30),('uncertainty_seed',20261015,0)):
+            value=config.get(name,default)
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not np.isfinite(value) or int(value)!=value or value<minimum:
+                raise ValueError(f'{name}必须是至少{minimum}的整数')
+        if config.get('doppler_estimator','spectral_moments') not in {'spectral_moments','narrowband_lag'}:
+            raise ValueError('doppler_estimator必须为spectral_moments或narrowband_lag')
+        for key in ("los_phase_compensation", "multi_harmonic_enabled", "refine_period", "compare_methods", "export_full_cpi_power"):
+            if key in config and not isinstance(config[key], bool):
+                raise ValueError(f"inversion.{key} 必须是布尔值")
+        enabled = config.get("los_phase_compensation", False) or config.get("compare_methods", False)
+        if enabled:
+            import math
+            for key, low, high in (("spin_axis_ra_deg", 0, 360), ("spin_axis_dec_deg", -90, 90)):
+                value = config.get(key)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+                    raise ValueError(f"视线相位补偿需要显式提供 inversion.{key}，范围 [{low}, {high}]")
+            if config.get("phase_period_convention", "half_rotation") not in {"half_rotation", "full_rotation"}:
+                raise ValueError("phase_period_convention 必须是 half_rotation 或 full_rotation")
+            if role != "scatter_centroid":
+                raise ValueError("视线相位补偿目前仅支持 scatter_centroid 时标")
+        if config.get("multi_harmonic_enabled", False) or config.get("compare_methods", False):
+            h = config.get("harmonics", 2)
+            if isinstance(h, bool) or not isinstance(h, (int, float)) or not float(h).is_integer() or h < 2:
+                raise ValueError("启用多谐波拟合或方法比较时 harmonics 必须是至少为 2 的整数")
     return config
 
 
@@ -231,11 +286,19 @@ def _validate_echo_dataset(echo: EchoDataset, present: set[str]) -> None:
             raise ValueError(f"{name} 长度必须等于 iq 第 0 维")
 
 
-def load_echo(path) -> EchoDataset:
+def load_echo(path, *, mapped_directory=None, load_clean=True) -> EchoDataset:
     """Load the stable ``echo.npz`` exchange format for inversion."""
 
     path = Path(path)
-    with np.load(path, allow_pickle=False) as data:
+    if mapped_directory is not None:
+        try:
+            from .processing_store import MappedArchive
+        except ImportError:
+            from processing_store import MappedArchive
+        archive=MappedArchive(path,mapped_directory)
+    else:
+        archive=np.load(path,allow_pickle=False)
+    with archive as data:
         required = ["elapsed_s", "iq"]
         missing = [name for name in required if name not in data]
         if missing:
@@ -262,7 +325,7 @@ def load_echo(path) -> EchoDataset:
         echo = EchoDataset(
             elapsed_s=elapsed_s,
             iq=iq,
-            clean_iq=np.asarray(data["clean_iq"]) if "clean_iq" in data else iq,
+            clean_iq=np.asarray(data["clean_iq"]) if load_clean and "clean_iq" in data else iq,
             valid=np.asarray(data["valid"], dtype=bool)
             if "valid" in data
             else np.ones(sample_count, dtype=bool),
