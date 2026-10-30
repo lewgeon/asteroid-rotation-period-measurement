@@ -95,10 +95,17 @@ if not output:
 output=Path(output);output.mkdir(parents=True,exist_ok=True)
 (output/'inversion_in_progress.json').write_text(json.dumps(dict(config=config,echo_identity=loaded_echo_identity)),encoding='utf-8')
 execution=resolve_device(config)
-report_summary('计算设备',[('请求',execution['requested']),('实际',execution['actual']),('加速范围','Chirp脉压／距离对齐／慢时间FFT／周期网格搜索；局部细化及病态网格CPU')])
+report_summary('计算设备',[('请求',execution['requested']),('实际',execution['actual']),('加速范围','Chirp脉压／距离对齐／慢时间FFT／独立特征周期网格；新精度选择器及局部细化使用CPU')])
 if execution['reason']:
     print('__WARNING__ '+json.dumps(dict(stage='inversion',message=execution['reason'],dialog=False)),flush=True)
-result = estimate_rotation(echo, config, progress_callback=report_progress)
+try:
+    result = estimate_rotation(echo, config, progress_callback=report_progress)
+except (ValueError, np.linalg.LinAlgError) as exc:
+    (output / 'period_selection_failure.json').write_text(json.dumps(dict(
+        policy=config.get('period_selection', 'predictive_joint'), status='failed',
+        error_type=type(exc).__name__, message=str(exc), config=config,
+        echo_identity=loaded_echo_identity), ensure_ascii=False, indent=2), encoding='utf-8')
+    raise
 if file_identity(args.echo)!=loaded_echo_identity:
     raise ValueError('反演计算期间回波改变，禁止将旧内存结果认证为新来源')
 for notice in getattr(result, "notices", ()):
@@ -180,6 +187,8 @@ def _save_period_observables(path):
             'echo_identity': loaded_echo_identity,
             "search_diagnostics": result.search_diagnostics,
             "feature_algorithm_version": 4,
+            'uncertainty_role': 'heuristic_first_difference_MAD_not_noise_covariance',
+            'effective_sample_count_role': 'weight_not_independent_sample_count',
             "cpi_range_statistics_support": "full_correlation" if hasattr(features, 'energy_range_width_90_s') else None,
             **({
                 "energy_width_definition": "central_90_percent_full_correlation_power",
@@ -209,6 +218,8 @@ period_max = config["period_max_s"]
 
 
 def _alias_fields(best_period_s):
+    if best_period_s is None:
+        return {'half_period_s': None, 'double_period_s': None}
     half = best_period_s / 2.0
     double = best_period_s * 2.0
     return {
@@ -258,7 +269,7 @@ if selection_report:
 else:
     consensus_period, consensus_support, consensus_spread, consensus_evidence = _cross_feature_consensus(summary)
     selection_policy = CONSENSUS_POLICY
-contributing = [summary[item["feature"]] for item in consensus_evidence]
+contributing = [summary[item["feature"]] for item in consensus_evidence if item['feature'] in summary]
 calibrated_faps = [] if selection_report else [
     item["false_alarm_probability"] for item in contributing
     if item["false_alarm_probability"] is not None
@@ -271,17 +282,17 @@ aliases = _alias_fields(consensus_period)
 best_summary = {
     "period_uncertainty_status":result.uncertainty_report.get('status','not_evaluated'),
     "final_3sigma_interval_s":result.uncertainty_report.get('final_3sigma_interval_s'),
-    "recommended_feature": "predictive_joint" if selection_report else "cross_feature_consensus",
+    "recommended_feature": config.get('period_selection', 'predictive_joint') if selection_report else "cross_feature_consensus",
     "best_period_s": consensus_period,
-    "best_period_h": consensus_period / 3600,
-    "relative_error": abs(consensus_period - truth) / truth if truth else None,
+    "best_period_h": consensus_period / 3600 if consensus_period is not None else None,
+    "relative_error": abs(consensus_period - truth) / truth if truth and consensus_period is not None else None,
     "false_alarm_probability": consensus_fap,
     "significant": consensus_significant,
     "significance_status": ("not_evaluated" if not calibrated_faps
                             else "significant" if consensus_significant else "not_significant"),
     "significance_calibration": (
         "conservative_cross_feature"
-        if calibrated_faps else "unavailable_multi_harmonic_regression"
+        if calibrated_faps else "unavailable_uncalibrated_precision_selection" if config.get('period_selection') in ('predictive_skill_energy', 'spherical_response') else "unavailable_multi_harmonic_regression"
     ),
     "time_axis_role": result.time_axis_role,
     "search_diagnostics": result.search_diagnostics,
@@ -291,7 +302,7 @@ best_summary = {
     "period_selection": selection_report,
     "period_interpretation": "observed_modulation_period",
     "rotation_period_identifiability": "symmetry_and_harmonic_ambiguity_not_resolved",
-    "relative_error_to_half_truth": abs(consensus_period-truth/2)/(truth/2) if truth else None,
+    "relative_error_to_half_truth": abs(consensus_period-truth/2)/(truth/2) if truth and consensus_period is not None else None,
     "truth_comparison_scope": "simulation_diagnostic_only_full_and_half_truth_not_used_in_selection",
     "consensus_relative_spread": consensus_spread,
     "consensus_evidence": consensus_evidence,
@@ -333,7 +344,7 @@ if not best_summary["significant"]:
         )
     else:
         warning_message = (
-            "多谐波回归分数尚无校准假警报概率；结果已按 significant=false 输出，"
+            "周期选择分数尚无校准假警报概率；结果已按 significant=false 输出，"
             "不能把回归峰值解释为统计显著性。"
         )
     print(
@@ -432,8 +443,8 @@ if go is not None:
         plot.add_trace(go.Scatter(x=[item.period_s for item in peaks], y=[item.score for item in peaks],
             mode='markers', name=name + ' 候选峰', marker=dict(size=9, symbol='diamond'),
             hovertemplate='候选周期 %{x:.8g} s<br>分数 %{y:.6g}<extra>%{fullData.name}</extra>'))
-    plot.add_vline(x=best_summary['best_period_s'], line_color='red',
-                   annotation_text='最终共识选择')
+    if best_summary['best_period_s'] is not None:
+        plot.add_vline(x=best_summary['best_period_s'], line_color='red', annotation_text='最终共识选择')
     plot.update_layout(
         title="周期搜索：曲线、候选峰与最终共识选择",
         xaxis_title="Candidate period (s)",
@@ -453,6 +464,7 @@ pending=output/'inversion_complete.pending.json'
 pending.write_text(json.dumps(completion,ensure_ascii=False),encoding='utf-8')
 pending.replace(output/'inversion_complete.json')
 (output/'inversion_in_progress.json').unlink(missing_ok=True)
+(output/'period_selection_failure.json').unlink(missing_ok=True)
 report_progress("inversion", 100, "周期反演完成")
 report_summary(
     "周期反演结果",
@@ -471,16 +483,18 @@ report_summary(
         ("对半周期真值的误差（仅仿真诊断）", "—" if best_summary['relative_error_to_half_truth'] is None
          else f"{best_summary['relative_error_to_half_truth'] * 100:.5f}%"),
         ("周期含义", "观测调制周期；形体对称及谐波歧义仍需判定"),
-        ("周期融合", ("整Run留出预测" if selection_report.get('diagnostics', {}).get('validation_mode') == 'whole_run_cross_validation'
+        ("周期融合", "已知极轴球面响应：整Run留出" if config.get('period_selection') == 'spherical_response' else ("整Run留出预测" if selection_report.get('diagnostics', {}).get('validation_mode') == 'whole_run_cross_validation'
                      else "共同拟合（Run不足，未留出验证）") if selection_report else "旧版候选投票"),
+        ("自动模型阶数", (f"L={selection_report.get('degree')}；已知极轴来自反演配置" if config.get('period_selection') == 'spherical_response'
+                          else f"H={selection_report.get('diagnostics', {}).get('harmonics')}" if config.get('period_selection') == 'predictive_skill_energy' else "未自动选阶")),
         ("显著性", {"not_evaluated": "未评估", "significant": "显著",
                     "not_significant": "不显著"}[best_summary["significance_status"]]),
         ("假警报概率", _fmt(best_summary["false_alarm_probability"], digits=4)),
         ("显著性校准", best_summary["significance_calibration"]),
-        ("正预测增益通道" if selection_report else "共识特征支撑", f"{best_summary['consensus_feature_support']} 个"),
+        ("响应特征数" if config.get('period_selection') == 'spherical_response' else "正预测增益通道" if selection_report else "共识特征支撑", f"{best_summary['consensus_feature_support']} 个"),
         ("共识相对离散度", _fmt(best_summary["consensus_relative_spread"], digits=4)),
         ("周期时间轴", best_summary["time_axis_role"]),
-        ("误差评估",{'not_evaluated':'未启用','unavailable':'观测不足或不可识别','experimental_coverage_unvalidated':'已完成条件性评估，覆盖率未校准'}.get(best_summary['period_uncertainty_status'],'未启用')),
+        ("误差评估",{'not_evaluated':'未启用','unavailable':'未能计算（详见误差诊断原因）','experimental_coverage_unvalidated':'已完成条件性评估，覆盖率未校准'}.get(best_summary['period_uncertainty_status'],'未计算')),
         ("半周期别称", _fmt(best_summary["half_period_s"], "s", digits=8)),
         ("二倍周期别称", _fmt(best_summary["double_period_s"], "s", digits=8)),
     ],

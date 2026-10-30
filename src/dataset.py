@@ -156,8 +156,16 @@ def normalize_inversion_policy(config: Dict[str, Any], layout: str) -> Dict[str,
             + ", ".join(f"inversion.{key}" for key in unknown)
         )
     if layout == "chirp":
-        if config.get('period_selection', 'predictive_joint') not in ('predictive_joint', 'legacy_consensus'):
-            raise ValueError('period_selection必须为predictive_joint或legacy_consensus')
+        strategy = config.get('period_selection', 'predictive_joint')
+        if strategy not in ('predictive_joint', 'legacy_consensus', 'predictive_skill_energy', 'spherical_response'):
+            raise ValueError('period_selection必须为predictive_joint、legacy_consensus、predictive_skill_energy或spherical_response')
+        if strategy in ('predictive_skill_energy', 'spherical_response'):
+            if config.get('doppler_estimator', 'spectral_moments') != 'spectral_moments':
+                raise ValueError('新精度策略首版仅支持 spectral_moments 的RMS多普勒带宽')
+            if role != 'scatter_centroid':
+                raise ValueError('新精度策略仅支持 scatter_centroid 时标')
+            if strategy == 'predictive_skill_energy' and config.get('los_phase_compensation', False) and config.get('phase_period_convention', 'half_rotation') != 'full_rotation':
+                raise ValueError('predictive_skill_energy 的LOS补偿需要 full_rotation 约定')
         if config.get('compute_device','cpu') not in ('cpu','cuda:0'):
             raise ValueError('compute_device必须为cpu或cuda:0')
         if config.get('uncertainty_method','none') not in ('none','run_bootstrap'):
@@ -171,7 +179,7 @@ def normalize_inversion_policy(config: Dict[str, Any], layout: str) -> Dict[str,
         for key in ("los_phase_compensation", "multi_harmonic_enabled", "refine_period", "compare_methods", "export_full_cpi_power"):
             if key in config and not isinstance(config[key], bool):
                 raise ValueError(f"inversion.{key} 必须是布尔值")
-        enabled = config.get("los_phase_compensation", False) or config.get("compare_methods", False)
+        enabled = config.get("los_phase_compensation", False) or config.get("compare_methods", False) or strategy == 'spherical_response'
         if enabled:
             import math
             for key, low, high in (("spin_axis_ra_deg", 0, 360), ("spin_axis_dec_deg", -90, 90)):

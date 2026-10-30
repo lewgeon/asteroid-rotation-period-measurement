@@ -1104,6 +1104,10 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
     pulse_count=stage['pulse_count']
     profiles=stage['profiles']
     if processing_path=='cpi':
+        if config.get('period_selection') in ('predictive_skill_energy', 'spherical_response'):
+            # Legacy preprocessing clips counts to epsilon for permissive
+            # individual searches; strict selectors must see the actual counts.
+            weights = np.asarray(features.effective_sample_count, dtype=float)
         feature_items=(('total_power',features.total_power),('doppler_centroid',features.doppler_centroid_hz),
             ('doppler_bandwidth',features.rms_bandwidth_hz),('range_centroid',features.range_centroid_s),
             ('range_energy_width',features.energy_range_width_90_s))
@@ -1111,6 +1115,10 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         feature_items=(('total_power',features.total_power),('range_centroid',features.centroid_delay_s),
             ('range_energy_width',features.energy_width_90_s))
     selection = method_options(config)
+    if config.get('period_selection') == 'spherical_response':
+        # The response model uses vector-interpolated geometry itself. The old
+        # longitude correction must not impose its different pole tolerance.
+        selection['los_phase_compensation'] = False
     phase_offset = None
     if selection["los_phase_compensation"] or config.get("compare_methods", False):
         phase_offset = effective_look_phase(echo, feature_times, config)
@@ -1204,7 +1212,7 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
             continue
         search_diagnostics["features"][name] = {**estimate.search_diagnostics, "status": "searched"}
         periods[name] = add_harmonics(estimate, config["period_min_s"], config["period_max_s"])
-    if not periods:
+    if not periods and config.get('period_selection', 'predictive_joint') not in ('predictive_skill_energy', 'spherical_response'):
         reasons = "；".join(f"{name}：{item['message']}"
                            for name, item in search_diagnostics["features"].items())
         raise PeriodSearchUnavailable(
@@ -1237,7 +1245,19 @@ def _estimate_chirp_rotation(echo, config, progress_callback=None):
         from period_uncertainty import assess_period_uncertainty
     observation_runs=(run_id[stage['cpi_windows'][:,0]] if processing_path=='cpi' else run_id)
     selection_report = {}
-    if config.get('period_selection', 'predictive_joint') == 'predictive_joint':
+    strategy = config.get('period_selection', 'predictive_joint')
+    if strategy in ('predictive_skill_energy', 'spherical_response'):
+        try:
+            from .precision_selection import select_precision_period
+        except ImportError:
+            from precision_selection import select_precision_period
+        if progress_callback:
+            progress_callback('inversion', 94, f'精度策略全频域搜索：{strategy}')
+        selection_report = select_precision_period(feature_times, dict(feature_items),
+            observation_runs, weights, echo, config, processing_path=processing_path,
+            phase_offset=phase_offset)
+        search_diagnostics['period_selection'] = selection_report['policy']
+    elif strategy == 'predictive_joint':
         try:
             from .joint_period import select_predictive_period
         except ImportError:

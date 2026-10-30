@@ -68,6 +68,15 @@ def _local_run_covariance(times,values,runs,period,harmonics=1,weights=None,phas
 
 
 def assess_period_uncertainty(times,features,runs,periods,config,weights=None,phase_offset=None,progress=None):
+    if config.get('period_selection') in ('predictive_skill_energy', 'spherical_response'):
+        return dict(enabled=config.get('uncertainty_method', 'none') != 'none',
+            status='unavailable' if config.get('uncertainty_method', 'none') != 'none' else 'not_evaluated',
+            selection_policy=config['period_selection'], coverage_calibrated=False,
+            run_count=int(len(np.unique(np.asarray(runs)))), replicates=None,
+            within_5_percent_of_baseline_fraction=None, bootstrap_failure_fraction=None,
+            execution_status='not_implemented',
+            final_3sigma_interval_s=None,
+            reason='新精度策略尚未接入每次完整重选阶数的重采样；不使用旧投票或固定阶数区间')
     if config.get('uncertainty_method','none')=='none':return dict(enabled=False,status='not_evaluated')
     t=np.asarray(times,float);runs=np.asarray(runs)
     w=np.ones(len(t)) if weights is None else np.asarray(weights,float)
@@ -139,7 +148,7 @@ def assess_period_uncertainty(times,features,runs,periods,config,weights=None,ph
         else:samples.append(None);failures+=1
         if progress:progress(repeat+1,n)
     finite=np.array([v for v in samples if v is not None])
-    fraction=float(np.mean(abs(finite/center-1)<=.05)) if len(finite) else 0.
+    fraction=float(np.mean(abs(finite/center-1)<=.05)) if len(finite) else None
     quantiles=np.quantile(finite,[.025,.5,.975]).tolist() if len(finite) else None
     return dict(enabled=True,status='experimental_coverage_unvalidated' if len(finite) else 'unavailable',method='whole_Run_pairs_bootstrap_full_search_and_current_consensus',
         consensus_policy=policy,
@@ -160,13 +169,21 @@ def assess_period_uncertainty(times,features,runs,periods,config,weights=None,ph
 
 def write_uncertainty_report(output,report):
     import html
+    precision = report.get('selection_policy') in ('predictive_skill_energy', 'spherical_response')
+    execution_description = ('当前精度策略尚未执行局部协方差或完整重选阶数的Run重采样，不提供相应区间。'
+        if precision else '已实现：局部Run聚类协方差、完整Run重采样与受限控制实验。尚未完成：变化几何、未知形状、共享ADC噪声及系统修正的完整总误差校准。')
+    resampling_description = ('本次没有执行Run重采样，未使用旧投票或固定阶数模型替代当前选择器。'
+        if precision else '重采样在原始周期搜索范围内重新搜索并执行原共识规则；保留同一Run内各CPI的相关关系。分位数反映采样敏感性，不等于经过实测覆盖率验证的置信区间。')
     report={**report,'deterministic_error_bound_s':None,
         'deterministic_error_bound_status':'not_established_unknown_total_model_error_and_global_alias_separation'}
     folder=Path(output);folder.mkdir(parents=True,exist_ok=True)
     (folder/'period_uncertainty.json').write_bytes(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False).encode('utf-8'))
     text=json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False)
     labels=dict(total_power='总能量',doppler_centroid='多普勒质心',doppler_bandwidth='多普勒RMS带宽',range_centroid='距离质心',range_energy_width='距离90%能量宽度')
-    def number(value):return '不可用' if value is None else f'{value:.8g}'
+    def number(value):return '未计算' if value is None else f'{value:.8g}'
+    def percent(key):
+        value=report.get(key)
+        return '未计算' if value is None else f'{100*value:.8g}%'
     rows=[]
     for name,value in report.get('local_features',{}).items():
         interval=value.get('conditional_3sigma_interval_s')
@@ -176,12 +193,12 @@ def write_uncertainty_report(output,report):
     content=('<!doctype html><meta charset="utf-8"><title>周期误差诊断</title><style>body{font:16px Microsoft YaHei;max-width:1100px;margin:32px auto;padding:0 24px;line-height:1.7;color:#273244}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #ddd;text-align:left}pre{white-space:pre-wrap}h1{font-size:25px}</style>'
         '<h1>周期误差诊断</h1><p>这些是有前提的误差估计，尚未校准覆盖率，不能作为最终周期的3σ保证。局部区间假设选对周期峰、波形模型正确且不同Run独立；不包含系统偏差。</p>'
         '<h2>严格总误差上界：尚未建立</h2><p>缺少经过验证的几何／波形模型总误差范围，也没有排除全部远处别名峰，不能从拟合残差或局部σ直接生成严格上界。高斯随机噪声本身也没有有限的100%幅度界。3σ在适当正态和校准条件下表示约99.73%覆盖，不是每次一定覆盖真值。</p>'
-        '<p>已实现：局部Run聚类协方差、完整Run重采样与受限控制实验。尚未完成：变化几何、未知形状、共享ADC噪声及系统修正的完整总误差校准。</p>'
-        '<p>完整Run重采样次数：'+str(report.get('replicates',0))+'；Run数量：'+str(report.get('run_count',0))+'；基线共识周期：'+number(report.get('baseline_consensus_period_s'))+' s。</p><p>'+html.escape(paragraph)+'</p>'
-        '<p>重采样在原始周期搜索范围内重新搜索并执行原共识规则；保留同一Run内各CPI的相关关系。分位数反映采样敏感性，不等于经过实测覆盖率验证的置信区间。</p>'
-        '<p>共识周期落在基线±5%内的比例：'+number(100*report.get('within_5_percent_of_baseline_fraction',0))+'%；搜索失败比例：'+number(100*report.get('bootstrap_failure_fraction',0))+'%。'+('未通过单峰条件，不提供单峰条件95%区间。' if report.get('enabled') and report.get('conditional_same_mode_95_interval_s') is None else '')+'</p>'
-        '<p>因验证模式切换而拒绝的重采样：'+str(report.get('bootstrap_mode_switch_failure_count',0))+'次；不混合整Run留出和共同拟合的周期分布。</p>'
+        '<p>'+execution_description+'</p>'
+        '<p>完整Run重采样次数：'+number(report.get('replicates'))+'；Run数量：'+number(report.get('run_count'))+'；基线共识周期：'+number(report.get('baseline_consensus_period_s'))+' s。</p><p>'+html.escape(paragraph)+'</p>'
+        '<p>'+resampling_description+'</p>'
+        '<p>共识周期落在基线±5%内的比例：'+percent('within_5_percent_of_baseline_fraction')+'；搜索失败比例：'+percent('bootstrap_failure_fraction')+'。'+('未通过单峰条件，不提供单峰条件95%区间。' if report.get('replicates') and report.get('conditional_same_mode_95_interval_s') is None else '')+'</p>'
+        '<p>因验证模式切换而拒绝的重采样：'+number(report.get('bootstrap_mode_switch_failure_count'))+'次；不混合整Run留出和共同拟合的周期分布。</p>'
         '<table><tr><th>特征</th><th>周期(s)</th><th>局部σ(s)</th><th>条件性±3σ范围(s)</th></tr>'+''.join(rows)+'</table>'
-        '<details><summary>局部σ从哪里来</summary><p>只拟合周期的教学情形中，gᵢ表示周期改变1秒造成的第i项模型变化。若观测误差独立且标准差为σᵧ，最小二乘的一阶传播给出 σ<sub>T</sub>²≈σ<sub>y</sub>²／Σgᵢ²。它由观测误差及模型灵敏度计算，不要求预先知道周期真值。实际程序同时拟合幅度、相位和截距，并按完整Run累积残差得分估计参数协方差，因此不能直接套用独立样本的简式。未知系统偏差不会自动被这个方差公式消除。</p></details>'
+        '<details><summary>局部σ从哪里来</summary><p>只拟合周期的教学情形中，gᵢ表示周期改变1秒造成的第i项模型变化。若观测误差独立且标准差为σᵧ，最小二乘的一阶传播给出 σ<sub>T</sub>²≈σ<sub>y</sub>²／Σgᵢ²。它由观测误差及模型灵敏度计算，不要求预先知道周期真值。旧策略的局部协方差实现同时拟合幅度、相位和截距，并按完整Run累积残差得分估计参数协方差，因此不能直接套用独立样本的简式；新精度策略本次未计算这项诊断。未知系统偏差不会自动被这个方差公式消除。</p></details>'
         '<details><summary>完整记录与逐次重采样结果</summary><pre>'+html.escape(text)+'</pre></details><p><a href="period_uncertainty.json">下载JSON记录</a></p>')
     (folder/'period_uncertainty.html').write_bytes(content.encode('utf-8'))
